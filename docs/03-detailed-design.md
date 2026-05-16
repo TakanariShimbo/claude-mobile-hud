@@ -573,6 +573,8 @@ class ChannelClient(private val baseUrl: String, private val token: String) {
 }
 ```
 
+**cleartext (Phase 4 開発時)**: Hub は plain HTTP (`http://...:8788`) なので、Android 9+ default の cleartext block を回避する必要がある。`phone/src/debug/res/xml/network_security_config.xml` (debug overlay) で `cleartextTrafficPermitted="true"` を有効化。release variant は `phone/src/main/res/xml/network_security_config.xml` の strict 設定 (cleartext 禁止 + system CA のみ) が当たる。Phase 5+ で Hub に TLS 終端を入れたら debug overlay は削除可能。
+
 ##### 3.2.2.1 HTTP 401 ハンドリング (Rev 2 修正)
 
 **POST 系 (`send` / `sendPermissionVerdict`)**:

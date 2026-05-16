@@ -1,25 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Hub への HTTP/SSE 接続用ネットワークセキュリティ設定。
+    main (= release variant の base) では **strict**: cleartext は禁止、システム CA のみ信頼。
+    Phase 5+ で Hub に TLS 終端 (Caddy / Tailscale Funnel 等) を入れる前提の設定。
 
-    Phase 4 の運用は **LAN / Tailscale (= private network) 上で平文 HTTP** を前提にしている
-    (Hub は TLS 終端を持たない単純な Node サーバ。NFR-20 で X-Token 認証は別レイヤ)。
-    Android 9+ (API 28+) は targetSdk が同等以上だと cleartext をデフォルト遮断するため、
-    明示的に許可しないと OkHttp が即 close する (= ConnectionController の connect_attempt
-    → immediate backoff loop)。
+    Phase 4 の開発時は debug variant の overlay (`phone/src/debug/res/xml/
+    network_security_config.xml`) が上書きして cleartext を許可する。
+    `assembleDebug` でしかこの app を実行しない方針 (NFR-24 / OOS-05 に従い、
+    Phase 4 は LAN/Tailscale 上の plain HTTP 前提だが、release 配布は Phase 5+ 待ち)。
 
-    範囲を絞れない理由:
-      - `network_security_config` の `<domain>` は FQDN または個別 IP のみ。CIDR 不可。
-      - ユーザの Wi-Fi が DHCP で都度変わるため、IP 列挙では不便。
-
-    Phase 5+ で TLS 終端 (Caddy / nginx reverse proxy / Tailscale Funnel) を導入したら
-    cleartext は不要になり、この設定ファイルは削除できる。
+    P2 of 371deaa review:
+    - `<certificates src="user" />` (= ユーザインストール CA を信頼) は MITM proxy で
+      OpenAI / Hub 全 https を覗ける緩和なので main では含めない。debug overlay に隔離する。
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="true">
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
-            <certificates src="user" />
         </trust-anchors>
     </base-config>
 </network-security-config>
