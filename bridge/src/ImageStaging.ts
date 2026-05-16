@@ -9,10 +9,9 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "./log/StructuredLog.js";
 
-/** 受理する MIME → 拡張子。AD-09。 */
+/** 受理する MIME → 拡張子。AD-09。IANA 公式の MIME のみ。 */
 const MIME_TO_EXT: Record<string, string> = {
     "image/jpeg": "jpg",
-    "image/jpg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
     "image/gif": "gif",

@@ -103,7 +103,7 @@ describe("HubClient ↔ Hub.BridgeServer integration", () => {
         });
         await client.connect();
         // ack を待たずに送信 → queue へ
-        client.sendReply("chat-1", "sess-B", "hello");
+        client.sendReply("chat-1", "hello");
         client.sendPermission({
             request_id: "req-1",
             session_id: "sess-B",

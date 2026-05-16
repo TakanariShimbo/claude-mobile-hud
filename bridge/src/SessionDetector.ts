@@ -1,13 +1,13 @@
 // Bridge は Claude Code から子プロセスとして起動される。
 // Claude Code は `claude --session-id <uuid> ...` で起動しているので、
-// 親プロセスの cmdline から session-id を抽出する。Phase 3 §6.2.3。
+// 親プロセスの cmdline から session-id を抽出する。Phase 3 §6.2.3 / AD-12。
 //
-// Linux 限定 (`/proc` を使う)。失敗時は env `CLAUDE_SESSION_ID` を fallback、
-// それも無ければ random UUID を生成 (Hub 側で意味が無くなるが、Bridge を起動
-// しないわけにはいかないので動かす。)
+// Linux 限定 (`/proc` を使う)。失敗時は env `CLAUDE_SESSION_ID` を fallback。
+// 両方無い場合は **fail-fast** で throw (random UUID で起動すると Hub 側の
+// session_active が Phone に出るのに Claude 側の履歴 file と一致せず、相関 ID 伝播
+// = AD-12 が破綻するため。Bridge は Claude Code の子としてしか正規起動されない)。
 
 import { readFile } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
 import type { Logger } from "./log/StructuredLog.js";
 
 export interface SessionDetectorOptions {
@@ -29,7 +29,7 @@ export class SessionDetector {
      * 優先順位:
      *  1. /proc/<ppid>/cmdline の `--session-id <uuid>`
      *  2. env CLAUDE_SESSION_ID
-     *  3. randomUUID() を生成 (warn log)
+     *  3. throw (Bridge が誤って単独起動された徴候)
      */
     async detect(): Promise<string> {
         const ppid = this.opts.parentPid ?? process.ppid;
@@ -52,9 +52,11 @@ export class SessionDetector {
             return envVal;
         }
 
-        const generated = randomUUID();
-        this.opts.logger?.warn("session_fallback_random", { session_id: generated });
-        return generated;
+        this.opts.logger?.error("session_id_unavailable", { ppid });
+        throw new Error(
+            `session_id not found: neither --session-id in /proc/${ppid}/cmdline nor CLAUDE_SESSION_ID env. ` +
+                "Bridge must be launched as a Claude Code child process.",
+        );
     }
 }
 

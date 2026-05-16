@@ -85,15 +85,14 @@ describe("SessionDetector", () => {
         expect(await det.detect()).toBe("from-env");
     });
 
-    it("detect falls back to random UUID when both missing", async () => {
+    it("detect throws when both cmdline and env are missing (fail-fast, P2-4)", async () => {
         const det = new SessionDetector({
             parentPid: 1,
             envValue: undefined,
             readCmdline: async () => "node\0",
             logger: silentLogger,
         });
-        const id = await det.detect();
-        expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+        await expect(det.detect()).rejects.toThrow(/session_id not found/);
     });
 
     it("detect handles cmdline read failure gracefully", async () => {

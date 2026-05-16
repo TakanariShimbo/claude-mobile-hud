@@ -19,12 +19,19 @@ interface BridgeConfig {
     logLevel: LogLevel;
 }
 
+const LOG_LEVELS: readonly LogLevel[] = ["DEBUG", "INFO", "WARN", "ERROR"] as const;
+
+function parseLogLevel(raw: string | undefined): LogLevel {
+    if (raw && (LOG_LEVELS as readonly string[]).includes(raw)) return raw as LogLevel;
+    return "INFO";
+}
+
 function loadConfig(): BridgeConfig {
     return {
         hubHost: process.env.HUB_HOST ?? "127.0.0.1",
         hubPort: Number.parseInt(process.env.HUB_BRIDGE_PORT ?? "8787", 10),
         inboxDir: process.env.BRIDGE_INBOX_DIR ?? ImageStaging.defaultPath(),
-        logLevel: (process.env.BRIDGE_LOG_LEVEL as LogLevel) ?? "INFO",
+        logLevel: parseLogLevel(process.env.BRIDGE_LOG_LEVEL),
     };
 }
 
@@ -44,18 +51,21 @@ async function main(): Promise<void> {
     await images.prepare();
 
     let mcp: McpServer | null = null;
+    // hub は callbacks 内 (onClose) で同期発火し得るので、`const hub = new HubClient(...)`
+    // 宣言前にハンドラから参照される TDZ 地雷を避ける (P1-4)。
+    let hub: HubClient | null = null;
     let shuttingDown = false;
     const shutdown = async (signal: string): Promise<void> => {
         if (shuttingDown) return;
         shuttingDown = true;
         root.info("shutdown", { signal });
         mcp?.close();
-        hub.close();
+        hub?.close();
         await images.cleanup();
         process.exit(0);
     };
 
-    const hub = new HubClient({
+    hub = new HubClient({
         host: config.hubHost,
         port: config.hubPort,
         sessionId,

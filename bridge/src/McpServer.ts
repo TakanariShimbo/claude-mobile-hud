@@ -10,18 +10,29 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
     CallToolRequestSchema,
     ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { readFileSync } from "node:fs";
 import type { HubClient } from "./HubClient.js";
 import { ImageStaging } from "./ImageStaging.js";
 import type { SendMessage, PermissionVerdictMessage } from "./wire/HubWire.js";
 import type { Logger } from "./log/StructuredLog.js";
 
 const SERVER_NAME = "claude-mobile-hud-bridge";
-const SERVER_VERSION = "0.1.0";
+// package.json から version を読む (二重管理回避、P3-1)。
+const SERVER_VERSION: string = ((): string => {
+    try {
+        const pkgUrl = new URL("../package.json", import.meta.url);
+        const raw = readFileSync(pkgUrl, "utf8");
+        return (JSON.parse(raw) as { version: string }).version;
+    } catch {
+        return "0.0.0";
+    }
+})();
 
 const INSTRUCTIONS =
     'Messages from a mobile client arrive as `notifications/claude/channel` with ' +
@@ -73,12 +84,23 @@ export interface McpServerOptions {
     images: ImageStaging;
     logger: Logger;
     onClose: () => void;
+    /**
+     * テスト時に InMemoryTransport などを差し込むための seam (省略時は StdioServerTransport)。
+     */
+    transport?: Transport;
 }
 
 export class McpServer {
     private readonly server: Server;
-    // 画像書き込みは順序保証 (同 chat_id の inbound notification が image_save 完了前に
-    // 後続 notification を Claude に届けてしまうのを防ぐ)
+    /**
+     * `notifications/claude/channel` (= deliverSend 経路) を全 chat 横断で直列化する Promise chain。
+     * image_base64 の staging が async なため、ある send の image 保存中に次の send が
+     * notification を先に届けないよう順序を担保する。同 chat 内ではなく全 channel に対する直列化。
+     *
+     * `deliverPermissionVerdict` (= notifications/claude/channel/permission) はこの queue を
+     * 通さない: permission は channel とは独立した notification 経路で、互いの順序を縛る
+     * 必要が無いため。
+     */
     private writeQueue: Promise<void> = Promise.resolve();
 
     constructor(private readonly opts: McpServerOptions) {
@@ -86,6 +108,10 @@ export class McpServer {
             { name: SERVER_NAME, version: SERVER_VERSION },
             {
                 capabilities: {
+                    // `experimental.claude/channel*` は MCP 公式仕様には無い custom capability。
+                    // Claude Code 側がこの 2 つを discover した場合に、対応する
+                    // `notifications/claude/channel{,/permission,/permission_request,/permission_abort}`
+                    // method を listen / emit してくれる前提。POC v1 から踏襲。
                     experimental: {
                         "claude/channel": {},
                         "claude/channel/permission": {},
@@ -99,12 +125,15 @@ export class McpServer {
     }
 
     async start(): Promise<void> {
-        await this.server.connect(new StdioServerTransport());
-        this.opts.logger.info("mcp_connected");
+        // onclose は connect() の前に設定する。await 中に transport が close を発火しても
+        // 取りこぼさないようにするため (P1-2)。
         this.server.onclose = () => {
             this.opts.logger.info("mcp_closed");
             this.opts.onClose();
         };
+        const transport = this.opts.transport ?? new StdioServerTransport();
+        await this.server.connect(transport);
+        this.opts.logger.info("mcp_connected");
     }
 
     close(): void {
@@ -156,7 +185,15 @@ export class McpServer {
                 throw new Error(`unknown tool: ${req.params.name}`);
             }
             const args = ReplyArgs.parse(req.params.arguments);
-            this.opts.hub.sendReply(args.chat_id, this.opts.sessionId, args.text);
+            const ok = this.opts.hub.sendReply(args.chat_id, args.text);
+            if (!ok) {
+                // Hub と切れている時に成功を返すと Claude 側で「届いた」と誤認するので isError (P2-8)。
+                this.opts.logger.warn("reply_drop_no_hub", { chat_id: args.chat_id });
+                return {
+                    isError: true,
+                    content: [{ type: "text", text: "hub disconnected; reply dropped" }],
+                };
+            }
             this.opts.logger.info("reply_sent", {
                 chat_id: args.chat_id,
                 text_len: args.text.length,
