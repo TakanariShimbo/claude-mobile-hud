@@ -9,10 +9,10 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "start": "tsx src/index.ts",
-    "pair": "tsx src/pair.ts",
-    "pair:lan": "tsx src/pair.ts lan",
-    "pair:ts": "tsx src/pair.ts ts",
+    "start": "tsx --env-file-if-exists=.env src/index.ts",
+    "pair": "tsx --env-file-if-exists=.env src/pair.ts",
+    "pair:lan": "tsx --env-file-if-exists=.env src/pair.ts lan",
+    "pair:ts": "tsx --env-file-if-exists=.env src/pair.ts ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
