@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Hub への HTTP/SSE 接続用ネットワークセキュリティ設定。
+
+    Phase 4 の運用は **LAN / Tailscale (= private network) 上で平文 HTTP** を前提にしている
+    (Hub は TLS 終端を持たない単純な Node サーバ。NFR-20 で X-Token 認証は別レイヤ)。
+    Android 9+ (API 28+) は targetSdk が同等以上だと cleartext をデフォルト遮断するため、
+    明示的に許可しないと OkHttp が即 close する (= ConnectionController の connect_attempt
+    → immediate backoff loop)。
+
+    範囲を絞れない理由:
+      - `network_security_config` の `<domain>` は FQDN または個別 IP のみ。CIDR 不可。
+      - ユーザの Wi-Fi が DHCP で都度変わるため、IP 列挙では不便。
+
+    Phase 5+ で TLS 終端 (Caddy / nginx reverse proxy / Tailscale Funnel) を導入したら
+    cleartext は不要になり、この設定ファイルは削除できる。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
