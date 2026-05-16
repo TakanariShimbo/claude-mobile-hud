@@ -23,8 +23,11 @@ kotlinxCoroutines = "1.9.0"
 # Networking
 okhttp = "5.1.0"
 
-# Rokid CXR-L (Glass app のみ)
+# Rokid CXR-L
+# - client-l (phone 側 = MediaStreamService への bind 経路) は :cxrglobal:lib 経由で使う
+# - cxr-service-bridge (glass 側 = system service 内蔵バインダ) は :glass で直接使う
 cxrClientL = "1.0.1"
+cxrServiceBridge = "1.0-20260212.103714-88"
 
 # Test
 junit = "4.13.2"
@@ -72,6 +75,7 @@ okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver",
 # Other
 play-services-code-scanner = { group = "com.google.android.gms", name = "play-services-code-scanner", version.ref = "playServicesCodeScanner" }
 rokid-cxr-client-l = { group = "com.rokid.cxr", name = "client-l", version.ref = "cxrClientL" }
+rokid-cxr-service-bridge = { group = "com.rokid.cxr", name = "cxr-service-bridge", version.ref = "cxrServiceBridge" }
 
 # Test
 junit = { group = "junit", name = "junit", version.ref = "junit" }

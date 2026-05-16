@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!--
+        P1-A of 5a review: ScreenAwakeManager で SCREEN_BRIGHT_WAKE_LOCK を acquire するため
+        必須 (POC 踏襲)。WAKE_LOCK が未宣言だと acquire() が SecurityException で即 crash する。
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
