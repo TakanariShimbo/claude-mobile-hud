@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  通知アイコン。Android は status bar 上ではマスキング (white silhouette) を
+  施すので vector で十分。ic_launcher_foreground を流用しない理由は (1) クロップ
+  範囲が異なる (2) 通知トレイ視認性を最大化したい。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,2C6.48,2 2,5.58 2,10c0,2.4 1.34,4.55 3.45,6.03c-0.31,0.66 -0.97,1.65 -2.14,2.6c-0.27,0.22 -0.13,0.66 0.21,0.66c2.74,0 4.94,-1.13 6.14,-1.95C10.42,17.78 11.2,17.85 12,17.85c5.52,0 10,-3.58 10,-7.85S17.52,2 12,2z" />
+</vector>

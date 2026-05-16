@@ -78,6 +78,16 @@ class ChannelRepository(
     private val _pendingPermissions = MutableStateFlow<List<PendingPermission>>(emptyList())
     val pendingPermissions: StateFlow<List<PendingPermission>> get() = _pendingPermissions.asStateFlow()
 
+    /**
+     * 一過性 channel event。replay=0 を意図的に維持している:
+     *   - ChannelService の collector は Application.onCreate で attach されるので、
+     *     新規 SSE event 到着前に subscribe されている契約。
+     *   - replay > 0 にすると Service プロセス再起動時に古い reply 通知が「もう一度」
+     *     post されてしまう (P2-6 議論)。kill 経路の通知は OS 側でユーザに届いている
+     *     ため二重通知になる。
+     *   - START_STICKY redeliver では Service が再 onCreate されるが、その時点の
+     *     `_events` 履歴は破棄が正しい (Hub からは SSE 再接続で再送される)。
+     */
     private val _events = MutableSharedFlow<ChannelEvent>(
         extraBufferCapacity = 16,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -300,21 +310,22 @@ class ChannelRepository(
                 }
             }
             is SseEvent.Permission -> {
+                val pending = PendingPermission(
+                    requestId = event.requestId,
+                    sessionId = event.sessionId,
+                    toolName = event.toolName,
+                    description = event.description,
+                    inputPreview = event.inputPreview,
+                    // Phone-local 時計。wire に createdAtMs が無いため (P3-6 / 設計書 §4.3.1)
+                    // 受信時刻を採用。Hub 側の本物 createdAtMs は permission_snapshot の
+                    // request_ids 順序が持つ (§3.2.1.3 注釈)。
+                    createdAtMs = System.currentTimeMillis(),
+                )
                 _pendingPermissions.update { current ->
                     if (current.any { it.requestId == event.requestId }) current
-                    else current + PendingPermission(
-                        requestId = event.requestId,
-                        sessionId = event.sessionId,
-                        toolName = event.toolName,
-                        description = event.description,
-                        inputPreview = event.inputPreview,
-                        // Phone-local 時計。wire に createdAtMs が無いため (P3-6 / 設計書 §4.3.1)
-                        // 受信時刻を採用。Hub 側の本物 createdAtMs は permission_snapshot の
-                        // request_ids 順序が持つ (§3.2.1.3 注釈)。
-                        createdAtMs = System.currentTimeMillis(),
-                    )
+                    else current + pending
                 }
-                _events.tryEmit(ChannelEvent.PermissionRequested(event.requestId))
+                _events.tryEmit(ChannelEvent.PermissionRequested(pending))
             }
             is SseEvent.PermissionAbort -> {
                 _pendingPermissions.update { current ->
@@ -326,7 +337,7 @@ class ChannelRepository(
                 )
             }
             is SseEvent.Reply -> {
-                _events.tryEmit(ChannelEvent.Reply(event.chatId, event.sessionId))
+                _events.tryEmit(ChannelEvent.Reply(event.chatId, event.sessionId, event.text))
             }
             else -> Unit
         }
@@ -394,9 +405,17 @@ class ChannelRepository(
     }
 }
 
-/** 一過性イベント (UI が SnackBar / 通知トリガに使う)。 */
+/**
+ * 一過性イベント (UI が SnackBar / 通知トリガに使う)。
+ *
+ * `Reply.text` / `PermissionRequested.pending` をペイロードとして同梱するのは、
+ * ChannelService が通知を作る際に sessionStore / pendingPermissions を別途
+ * lookup する race を避けるため (PermissionRequested は emit 時点では list に
+ * 入っているが、reply は SessionStore にも到達しており、UI 観点の "返信文" は
+ * その場で値が固まっている event のほうが安全)。
+ */
 sealed class ChannelEvent {
-    data class Reply(val chatId: String, val sessionId: String?) : ChannelEvent()
-    data class PermissionRequested(val requestId: String) : ChannelEvent()
+    data class Reply(val chatId: String, val sessionId: String?, val text: String) : ChannelEvent()
+    data class PermissionRequested(val pending: PendingPermission) : ChannelEvent()
     data class Sent(val chatId: String, val localMessageId: Long) : ChannelEvent()
 }

@@ -2,7 +2,26 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Phase 3 §3.3 / §3.6 — Hub HTTP + Glass CXR-L + Mic capture + 通知 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- 3 つの FGS が共有 (§3.3.5.3: ChannelService / GlassConnectionService / VerdictDispatchService) -->
+    <!-- API 34+ で導入。minSdk=31 のため tools:targetApi で lint を満たす。 -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"
+        tools:targetApi="34" />
+    <!-- MicForegroundService 用 (API 34+) -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"
+        tools:targetApi="34" />
+    <!-- 4b2 で MicCapture が AudioRecord を開く際に必要 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 4c の CXR-L 経路で Bluetooth SCO (BT mic) を使う準備 -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <application
+        android:name=".PhoneApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -11,17 +30,41 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Phone">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:label="@string/app_name"
+            android:launchMode="singleTask"
             android:theme="@style/Theme.Phone">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Phase 3 §3.3 — service 層 -->
+        <service
+            android:name=".service.ChannelService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".service.GlassConnectionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".service.MicForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+        <service
+            android:name=".service.VerdictDispatchService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- §3.8 — 通知シェード経由 verdict 受け口 -->
+        <receiver
+            android:name=".service.PermissionActionReceiver"
+            android:exported="false" />
     </application>
 
 </manifest>
