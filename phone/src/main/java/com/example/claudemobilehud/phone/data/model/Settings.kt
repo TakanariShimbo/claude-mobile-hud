@@ -1,5 +1,7 @@
 package com.example.claudemobilehud.phone.data.model
 
+import androidx.compose.runtime.Immutable
+
 /**
  * Phone 側設定。SettingsStore (DataStore Preferences) で永続化。Phase 3 §3.6.2。
  *
@@ -7,7 +9,10 @@ package com.example.claudemobilehud.phone.data.model
  * - `token`: X-Token (NFR-20)
  * - `openAiApiKey`: 音声入力 (OpenAI Realtime API) 用
  * - `lastCurrentSessionId`: FR-PH-54 で 再起動後の current session 復元用
+ *
+ * P3-A of 4c2 review: `@Immutable` で SettingsDialog の引数 stability を保つ。
  */
+@Immutable
 data class Settings(
     val baseUrl: String = "",
     val token: String = "",

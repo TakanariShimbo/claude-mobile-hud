@@ -1,6 +1,7 @@
 package com.example.claudemobilehud.phone.data
 
 import android.content.Context
+import android.net.Uri
 import com.example.claudemobilehud.phone.data.error.PhoneWireError
 import com.example.claudemobilehud.phone.data.error.TransientError
 import com.example.claudemobilehud.phone.data.model.ChatMessage
@@ -249,11 +250,43 @@ class ChannelRepository(
 
     fun stopTranscription() = input.stop()
 
+    /**
+     * P2-E of 4c2 review: Uri → ImageProcessor.encode を Repository に集約し、
+     * 失敗は wire-typed exception 経由で `_errors` flow に流す。UI 側で
+     * `IllegalArgumentException.message` を直接 snackbar に出す古い経路だと
+     * localized message と一貫しなかった (MainScreenEffects.toUserMessage 経路と
+     * 揃える)。
+     */
+    suspend fun attachImageFromUri(uri: Uri) {
+        runCatching { ImageProcessor.encode(applicationContext, uri) }
+            .onSuccess { image ->
+                // P2-F: 既に持っていた cache file を破棄してから差し替える。
+                _attachedImage.value?.let { previous ->
+                    runCatching { File(previous.localPath).delete() }
+                }
+                _attachedImage.value = image
+            }
+            .onFailure { emitErrorFromThrowable(it) }
+    }
+
     fun attachImage(image: ImageAttachment) {
+        // P2-F: 直接差し替え経路でも前 cache を消す。
+        _attachedImage.value?.let { previous ->
+            if (previous.localPath != image.localPath) {
+                runCatching { File(previous.localPath).delete() }
+            }
+        }
         _attachedImage.value = image
     }
 
     fun clearAttachedImage() {
+        // P2-F of 4c2 review: 添付取消時に cache file もここで削除する。
+        // 送信成功経路 (clearInput) では Bridge が staging で複製済みなので、
+        // Phone-local cache は不要になっている。失敗時は handleSendFailure が
+        // 再設定するので、ここで delete されないルートを通る。
+        _attachedImage.value?.let { previous ->
+            runCatching { File(previous.localPath).delete() }
+        }
         _attachedImage.value = null
     }
 
