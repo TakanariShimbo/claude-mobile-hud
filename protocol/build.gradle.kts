@@ -16,10 +16,14 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
 
     testImplementation(libs.junit.jupiter)
-    testImplementation(libs.kotlinx.coroutines.test)
     testRuntimeOnly(libs.junit.platform.launcher)
 }
 
 tasks.test {
     useJUnitPlatform()
+    // golden 再生成モードを Gradle property → JVM system property に伝播。
+    // 通常は verify-only、`-Pgolden.write=true` でファイル書き込みモードに切替。
+    if (project.hasProperty("golden.write")) {
+        systemProperty("golden.write", project.property("golden.write").toString())
+    }
 }

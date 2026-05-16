@@ -17,8 +17,7 @@
     {
       "id": 3,
       "role": "sys",
-      "text": "system note",
-      "chat_id": null
+      "text": "system note"
     }
   ],
   "ts": 1700000004000

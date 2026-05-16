@@ -68,15 +68,16 @@ export class OutstandingPermissions {
         };
     }
 
-    /** entry を PermissionSse に変換 (SSE 再 push 用) */
+    /** entry を PermissionSse に変換 (SSE 再 push 用)。session_id が null なら key 自体を省略。 */
     static toSse(entry: OutstandingEntry): PermissionSse {
-        return {
+        const base: PermissionSse = {
             type: "permission",
             request_id: entry.requestId,
-            session_id: entry.sessionId ?? undefined,
             tool_name: entry.toolName,
             description: entry.description,
             input_preview: entry.inputPreview,
         };
+        if (entry.sessionId !== null) base.session_id = entry.sessionId;
+        return base;
     }
 }

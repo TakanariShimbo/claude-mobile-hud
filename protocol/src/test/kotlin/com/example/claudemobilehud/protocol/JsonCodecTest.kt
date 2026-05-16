@@ -1,6 +1,10 @@
 package com.example.claudemobilehud.protocol
 
 import com.example.claudemobilehud.protocol.codec.JsonCodec
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.DynamicTest
@@ -20,15 +24,22 @@ class JsonCodecTest {
         }
 
     @TestFactory
-    fun `decoded payload contains discriminator field 'event'`(): List<DynamicTest> =
+    fun `encoded JSON has 'event' discriminator matching SerialName`(): List<DynamicTest> =
         WireSamples.all.map { (name, event) ->
-            DynamicTest.dynamicTest("$name: JSON has 'event' discriminator") {
-                val payload = String(JsonCodec.encode(event))
-                assertEquals(
-                    true,
-                    payload.contains("\"event\":\""),
-                    "missing event discriminator in $name payload: $payload",
-                )
+            DynamicTest.dynamicTest("$name: discriminator equals SerialName") {
+                val payload = JsonCodec.encode(event).toString(Charsets.UTF_8)
+                val obj = Json.parseToJsonElement(payload).jsonObject
+                val discriminator = obj["event"]?.jsonPrimitive?.content
+                    ?: error("missing 'event' field in $name payload: $payload")
+                val expected = serialNameOf(event)
+                assertEquals(expected, discriminator, "$name: discriminator mismatch")
             }
         }
+
+    /** sealed の subclass の `@SerialName` を Java reflection で取得 (kotlin-reflect 不要)。 */
+    private fun serialNameOf(event: WireEvent): String {
+        val ann = event::class.java.getAnnotation(SerialName::class.java)
+            ?: error("no @SerialName on ${event::class.java.simpleName}")
+        return ann.value
+    }
 }

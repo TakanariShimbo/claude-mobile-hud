@@ -6,8 +6,9 @@
 //   GET  /events       SSE。接続成立直後に session_snapshot → permission_snapshot → 個別 permission
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { ChatRegistry } from "../state/ChatRegistry.js";
-import { OutstandingPermissions } from "../state/OutstandingPermissions.js";
+import { OutstandingPermissions, type OutstandingEntry } from "../state/OutstandingPermissions.js";
 import { SessionRegistry } from "../state/SessionRegistry.js";
 import { SseClients } from "./SseClients.js";
 import { ERROR_CODES, ERROR_HTTP_STATUS, type ErrorCode } from "../wire/ErrorCodes.js";
@@ -34,6 +35,11 @@ export interface HttpServerDeps {
     token: string | null;
     sseKeepAliveMs: number;
 }
+
+const BODY_LIMIT_BYTES = 16 * 1024 * 1024; // 16 MB (image_base64 を含むので大きめ)
+
+type ReadJsonError = "too_large" | "invalid_json" | "empty";
+type ReadJsonResult<T> = { ok: true; body: T } | { ok: false; error: ReadJsonError };
 
 export class HttpServer {
     private readonly server: Server;
@@ -84,22 +90,24 @@ export class HttpServer {
 
     private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!this.checkAuth(req, res)) return;
-        const url = req.url ?? "/";
+        // querystring がついていても path 一致を許す (例: /events?ts=12345)。
+        const path = new URL(req.url ?? "/", "http://x").pathname;
         const method = req.method ?? "GET";
 
-        if (method === "POST" && url === "/send") return this.handleSend(req, res);
-        if (method === "POST" && url === "/permission") return this.handlePermission(req, res);
-        if (method === "GET" && url === "/events") return this.handleEvents(req, res);
+        if (method === "POST" && path === "/send") return this.handleSend(req, res);
+        if (method === "POST" && path === "/permission") return this.handlePermission(req, res);
+        if (method === "GET" && path === "/events") return this.handleEvents(req, res);
 
         res.statusCode = 404;
         res.end();
     }
 
     private checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
-        if (this.deps.token === null) return true;
+        const expected = this.deps.token;
+        if (expected === null) return true;
         const provided = req.headers["x-token"];
         const tokenStr = Array.isArray(provided) ? provided[0] : provided;
-        if (tokenStr !== this.deps.token) {
+        if (!constantTimeEquals(tokenStr ?? "", expected)) {
             this.sendError(res, ERROR_CODES.AUTH_FAILED, "X-Token mismatch");
             return false;
         }
@@ -107,8 +115,13 @@ export class HttpServer {
     }
 
     private async handleSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
-        const body = await readJsonBody<SendRequest>(req);
-        if (!body || typeof body.text !== "string") {
+        const result = await readJsonBody<SendRequest>(req);
+        if (!result.ok) {
+            this.sendError(res, mapReadError(result.error, "send"), result.error);
+            return;
+        }
+        const body = result.body;
+        if (typeof body.text !== "string") {
             this.sendError(res, ERROR_CODES.INVALID_PAYLOAD, "missing text");
             return;
         }
@@ -140,8 +153,13 @@ export class HttpServer {
     }
 
     private async handlePermission(req: IncomingMessage, res: ServerResponse): Promise<void> {
-        const body = await readJsonBody<PermissionRequest>(req);
-        if (!body || typeof body.request_id !== "string" ||
+        const result = await readJsonBody<PermissionRequest>(req);
+        if (!result.ok) {
+            this.sendError(res, mapReadError(result.error, "permission"), result.error);
+            return;
+        }
+        const body = result.body;
+        if (typeof body.request_id !== "string" ||
             (body.behavior !== "allow" && body.behavior !== "deny")) {
             this.sendError(res, ERROR_CODES.INVALID_PAYLOAD, "missing request_id/behavior");
             return;
@@ -151,29 +169,57 @@ export class HttpServer {
             this.sendError(res, ERROR_CODES.PERMISSION_GONE, "verdict already sent or unknown");
             return;
         }
-        if (entry.sessionId === null) {
-            this.deps.logger.warn("verdict_no_session", { request_id: body.request_id });
-        } else {
-            const sent = this.deps.dispatchToBridge(entry.sessionId, {
-                type: "permission_verdict",
-                request_id: body.request_id,
-                behavior: body.behavior,
-            });
-            if (!sent) {
-                this.deps.logger.warn("verdict_dispatch_failed", {
-                    request_id: body.request_id,
-                    session_id: entry.sessionId,
-                });
-            }
-        }
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-        res.end("{}");
+
+        if (!this.dispatchVerdict(entry, body.behavior, res)) return;
+
+        this.sendJson(res, 200, {});
         this.deps.logger.info("permission_verdict", {
             request_id: body.request_id,
             behavior: body.behavior,
             session_id: entry.sessionId ?? "",
         });
+    }
+
+    /**
+     * verdict を Bridge へ転送。失敗時は Phone へ abort broadcast + 4xx 返却 (P1-1)。
+     * @returns success の場合 true。失敗で response を既に送った場合 false。
+     */
+    private dispatchVerdict(
+        entry: OutstandingEntry,
+        behavior: "allow" | "deny",
+        res: ServerResponse,
+    ): boolean {
+        if (entry.sessionId === null) {
+            // session 不明の outstanding は本来 race の徴候。Phone は entry を既に消したので
+            // permission_abort で同期させる。
+            this.deps.logger.warn("verdict_no_session", { request_id: entry.requestId });
+            this.broadcast({
+                type: "permission_abort",
+                request_id: entry.requestId,
+                reason: "no_session",
+            });
+            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, "verdict target session unknown");
+            return false;
+        }
+        const sent = this.deps.dispatchToBridge(entry.sessionId, {
+            type: "permission_verdict",
+            request_id: entry.requestId,
+            behavior,
+        });
+        if (!sent) {
+            this.deps.logger.warn("verdict_dispatch_failed", {
+                request_id: entry.requestId,
+                session_id: entry.sessionId,
+            });
+            this.broadcast({
+                type: "permission_abort",
+                request_id: entry.requestId,
+                reason: "dispatch_failed",
+            });
+            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, "session disappeared");
+            return false;
+        }
+        return true;
     }
 
     private handleEvents(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -215,7 +261,9 @@ export class HttpServer {
             return this.deps.sessions.get(requested) ? requested : null;
         }
         const ids = this.deps.sessions.activeIds();
-        return ids.length === 1 ? ids[0]! : null;
+        if (ids.length !== 1) return null;
+        const only = ids[0];
+        return only ?? null;
     }
 
     private sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -229,23 +277,43 @@ export class HttpServer {
     }
 }
 
-async function readJsonBody<T>(req: IncomingMessage): Promise<T | null> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) {
-        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-        if (totalBytes(chunks) > 16 * 1024 * 1024) return null; // 16 MB ceiling (image_base64 想定)
+function mapReadError(err: ReadJsonError, endpoint: "send" | "permission"): ErrorCode {
+    if (err === "too_large") {
+        // /send は base64 画像が含まれうるので IMAGE_TOO_LARGE。/permission は本文小なので INVALID_PAYLOAD。
+        return endpoint === "send" ? ERROR_CODES.IMAGE_TOO_LARGE : ERROR_CODES.INVALID_PAYLOAD;
     }
+    return ERROR_CODES.INVALID_PAYLOAD;
+}
+
+async function readJsonBody<T>(req: IncomingMessage): Promise<ReadJsonResult<T>> {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let overLimit = false;
+    for await (const chunk of req) {
+        const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        size += buf.length;
+        if (size > BODY_LIMIT_BYTES) {
+            // 上限超過後は accumulate を止めるが、req は drain し続ける (client に
+            // 応答を返すための socket を生かす)。req.destroy() すると client は
+            // ECONNRESET でレスポンスを受け取れない。
+            overLimit = true;
+            continue;
+        }
+        chunks.push(buf);
+    }
+    if (overLimit) return { ok: false, error: "too_large" };
     const raw = Buffer.concat(chunks).toString("utf8");
-    if (!raw) return null;
+    if (raw.length === 0) return { ok: false, error: "empty" };
     try {
-        return JSON.parse(raw) as T;
+        return { ok: true, body: JSON.parse(raw) as T };
     } catch {
-        return null;
+        return { ok: false, error: "invalid_json" };
     }
 }
 
-function totalBytes(chunks: Buffer[]): number {
-    let n = 0;
-    for (const c of chunks) n += c.length;
-    return n;
+function constantTimeEquals(a: string, b: string): boolean {
+    const ba = Buffer.from(a, "utf8");
+    const bb = Buffer.from(b, "utf8");
+    if (ba.length !== bb.length) return false;
+    return timingSafeEqual(ba, bb);
 }

@@ -89,15 +89,14 @@ describe("SessionRegistry", () => {
 });
 
 describe("ChatRegistry", () => {
-    it("mint produces monotonically increasing zero-padded ids", () => {
-        const reg = new ChatRegistry();
-        expect(reg.mint()).toBe("chat-000001");
-        expect(reg.mint()).toBe("chat-000002");
-        expect(reg.mint()).toBe("chat-000003");
-    });
+    const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-    it("custom prefix", () => {
-        const reg = new ChatRegistry("foo");
-        expect(reg.mint()).toBe("foo-000001");
+    it("mint produces RFC 4122 UUID v4 (Phase 2 §4.6)", () => {
+        const reg = new ChatRegistry();
+        const a = reg.mint();
+        const b = reg.mint();
+        expect(a).toMatch(UUID_V4_RE);
+        expect(b).toMatch(UUID_V4_RE);
+        expect(a).not.toBe(b);
     });
 });

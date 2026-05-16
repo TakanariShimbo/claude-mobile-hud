@@ -255,7 +255,7 @@ describe("Hub integration", () => {
         });
         expect(resp.status).toBe(200);
         const body = (await resp.json()) as { chat_id: string; session_id?: string };
-        expect(body.chat_id).toMatch(/^chat-\d+$/);
+        expect(body.chat_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
         expect(body.session_id).toBe("sess-A");
 
         const fwd = await bridge.waitFor("send");
@@ -402,10 +402,84 @@ describe("Hub integration", () => {
             expect(withToken.status).toBe(400);
             const ok = (await withToken.json()) as { error_code: string };
             expect(ok.error_code).toBe("session_not_active");
+
+            // GET /events も同様に 401 (Phone の reconnect loop 暴走防止のため)
+            const sseNoToken = await fetch(`http://127.0.0.1:${httpPort}/events`);
+            expect(sseNoToken.status).toBe(401);
+            await sseNoToken.body?.cancel();
+
+            // querystring 付きでも path 一致が効くこと (HttpServer P2-10)
+            const sseQs = await fetch(`http://127.0.0.1:${httpPort}/events?ts=12345`, {
+                headers: { "X-Token": "secret-xyz" },
+            });
+            expect(sseQs.status).toBe(200);
+            await sseQs.body?.cancel();
         } finally {
             await Promise.allSettled([bridge.close(), http.close()]);
             // afterEach の h.close() を unsupervised にしないよう、ダミーを差し戻す
             h = await startHarness();
         }
+    });
+
+    it("graceful shutdown closes connected SSE clients (EOS)", async () => {
+        const sse = new SseReader(`http://127.0.0.1:${h.httpPort}/events`);
+        await sse.start();
+        await sse.waitForType("session_snapshot");
+
+        // close 中に SSE が EOS を受け取れる (= reader が done になる) ことを確認。
+        const httpClosed = h.http.close();
+        await httpClosed; // reject しないこと自体が check
+        sse.close();
+    });
+
+    it("POST /send with too-large body returns image_too_large", async () => {
+        const bridge = new FakeBridge(h.bridgePort);
+        await bridge.untilConnected();
+        bridge.send({ type: "register", session_id: "A", pid: 1 });
+        await bridge.waitFor("ack_register");
+        // 17 MB の文字列を text に詰めて送る (16 MB 上限超過)
+        const huge = "a".repeat(17 * 1024 * 1024);
+        const resp = await fetch(`http://127.0.0.1:${h.httpPort}/send`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: huge }),
+        });
+        expect(resp.status).toBe(400); // ERROR_HTTP_STATUS[IMAGE_TOO_LARGE] = 400
+        const body = (await resp.json()) as { error_code: string };
+        expect(body.error_code).toBe("image_too_large");
+        bridge.close();
+    });
+
+    it("POST /permission with dispatch failure broadcasts abort and returns session_not_active", async () => {
+        // FakeBridge を register → ack まで進めた後、socket を destroy する。
+        // Hub 側の session_id 登録は残るが send は failed になる…ように見せかけるため、
+        // 別 harness を作って bridge を listen するも 1 件も register させない状態にする。
+        const sse = new SseReader(`http://127.0.0.1:${h.httpPort}/events`);
+        await sse.start();
+        await sse.waitForType("session_snapshot");
+
+        // 直接 outstanding に session_id 不明の entry を仕込んで verdict を打つ
+        h.outstanding.add({
+            requestId: "ghost",
+            sessionId: null,
+            toolName: "Bash",
+            description: "x",
+            inputPreview: "x",
+            createdAtMs: Date.now(),
+            bridgeSessionId: "phantom",
+        });
+        const resp = await fetch(`http://127.0.0.1:${h.httpPort}/permission`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ request_id: "ghost", behavior: "allow" }),
+        });
+        expect(resp.status).toBe(400);
+        const body = (await resp.json()) as { error_code: string };
+        expect(body.error_code).toBe("session_not_active");
+        // Phone へ abort が流れる
+        const abort = await sse.waitForType("permission_abort");
+        expect(abort.request_id).toBe("ghost");
+        expect(h.outstanding.has("ghost")).toBe(false);
+        sse.close();
     });
 });

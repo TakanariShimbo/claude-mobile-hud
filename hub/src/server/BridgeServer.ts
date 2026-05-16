@@ -80,9 +80,20 @@ export class BridgeServer {
     }
 
     private writeNdjson(socket: Socket, msg: HubToBridgeMessage): boolean {
-        if (socket.destroyed) return false;
-        socket.write(JSON.stringify(msg) + "\n");
-        return true;
+        if (socket.destroyed || socket.writableEnded) return false;
+        try {
+            const ok = socket.write(JSON.stringify(msg) + "\n");
+            if (!ok) {
+                this.deps.logger.warn("write_backpressure", { type: msg.type });
+            }
+            return true;
+        } catch (err) {
+            this.deps.logger.warn("write_failed", {
+                type: msg.type,
+                error: (err as Error).message,
+            });
+            return false;
+        }
     }
 
     private onConnection(socket: Socket): void {
@@ -142,9 +153,11 @@ export class BridgeServer {
                 this.handlePermissionAbort(state, msg);
                 return;
             default: {
+                // 型網羅性チェック (将来 type を追加した時に compile error)。
                 const _exhaust: never = msg;
+                void _exhaust;
                 this.deps.logger.warn("unknown_message", { line_head: line.slice(0, 80) });
-                return _exhaust;
+                return;
             }
         }
     }
@@ -177,13 +190,37 @@ export class BridgeServer {
         });
     }
 
+    /**
+     * register 前に届いたメッセージは reject + warn log。
+     * §6.3 / Phase 3 §1.3 D-中。
+     */
+    private rejectIfNotRegistered(state: SocketState, msgType: string): boolean {
+        if (state.sessionId !== null) return false;
+        this.deps.logger.warn("msg_before_register", {
+            bridge_session_id: state.bridgeSessionId,
+            type: msgType,
+        });
+        return true;
+    }
+
+    /**
+     * Bridge は 1 socket = 1 session。msg.session_id と socket の session_id が
+     * 食い違う場合は trust boundary 違反として reject + warn log。
+     */
+    private rejectIfSessionMismatch(state: SocketState, msgSessionId: string, msgType: string): boolean {
+        if (state.sessionId === msgSessionId) return false;
+        this.deps.logger.warn("session_id_mismatch", {
+            bridge_session_id: state.bridgeSessionId,
+            type: msgType,
+            socket_session_id: state.sessionId ?? "",
+            msg_session_id: msgSessionId,
+        });
+        return true;
+    }
+
     private handleReply(state: SocketState, msg: BridgeReplyMessage): void {
-        if (state.sessionId === null) {
-            this.deps.logger.warn("reply_before_register", {
-                bridge_session_id: state.bridgeSessionId,
-            });
-            return;
-        }
+        if (this.rejectIfNotRegistered(state, "reply")) return;
+        if (this.rejectIfSessionMismatch(state, msg.session_id, "reply")) return;
         const sse: ReplySse = {
             type: "reply",
             chat_id: msg.chat_id,
@@ -194,12 +231,8 @@ export class BridgeServer {
     }
 
     private handlePermission(state: SocketState, msg: BridgePermissionMessage): void {
-        if (state.sessionId === null) {
-            this.deps.logger.warn("permission_before_register", {
-                bridge_session_id: state.bridgeSessionId,
-            });
-            return;
-        }
+        if (this.rejectIfNotRegistered(state, "permission")) return;
+        if (this.rejectIfSessionMismatch(state, msg.session_id, "permission")) return;
         this.deps.outstanding.add({
             requestId: msg.request_id,
             sessionId: msg.session_id,
@@ -221,15 +254,19 @@ export class BridgeServer {
     }
 
     private handlePermissionAbort(state: SocketState, msg: BridgePermissionAbortMessage): void {
+        if (this.rejectIfNotRegistered(state, "permission_abort")) return;
         const removed = this.deps.outstanding.remove(msg.request_id);
         if (!removed) {
             this.deps.logger.debug("abort_unknown_request", { request_id: msg.request_id });
+            // 知らない request_id の abort は Phone に broadcast しない (P1-2)。
+            // Phone は既に消去済み or そもそも知らないので、broadcast すると不要な noise になる。
+            return;
         }
         const sse: PermissionAbortSse = {
             type: "permission_abort",
             request_id: msg.request_id,
-            reason: msg.reason,
         };
+        if (msg.reason !== undefined) sse.reason = msg.reason;
         this.deps.phoneBroadcast(sse);
     }
 

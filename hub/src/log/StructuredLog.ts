@@ -49,10 +49,20 @@ export class StructuredLog implements Logger {
     }
 }
 
+// 空白 / quote / `=` / `\` / 制御文字 (0x00-0x1F, 0x7F) のいずれかを含むなら quote する。
+const NEEDS_QUOTE = /[\s"=\\\x00-\x1f\x7f]/;
+
+/**
+ * key=value のための値整形。
+ * - null / undefined はそれぞれ "null" / "undefined" (空文字と区別する。Phase 3 §8.3 の例参照)。
+ * - 数値・boolean はそのまま。
+ * - string は空白・`=`・`\`・改行・制御文字・引用符を含む場合 `JSON.stringify` で完全 escape。
+ *   1 行 1 イベント (Phase 3 §8.3) を壊さない。
+ */
 function formatValue(v: unknown): string {
-    if (v === null || v === undefined) return '""';
+    if (v === null) return "null";
+    if (v === undefined) return "undefined";
     if (typeof v === "number" || typeof v === "boolean") return String(v);
     const s = typeof v === "string" ? v : JSON.stringify(v);
-    if (/[\s"=]/.test(s)) return `"${s.replace(/"/g, '\\"')}"`;
-    return s;
+    return NEEDS_QUOTE.test(s) ? JSON.stringify(s) : s;
 }

@@ -5,6 +5,7 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.DynamicTest
 import org.junit.jupiter.api.TestFactory
 import java.nio.file.Files
@@ -12,19 +13,26 @@ import java.nio.file.Path
 
 /**
  * Phase 3 §2.6 の Kotlin side golden generator。
- * Gradle :protocol:test の作業ディレクトリは protocol/ なので、
- * 出力先は protocol/src/test/golden/kotlin/<case>.json (git 管理対象)。
+ * 出力先: `protocol/src/test/golden/kotlin/<case>.json` (git 管理対象)。
  *
- * 各テストは
- *   1. JsonCodec で encode
- *   2. golden file が存在しなければ作成 (= 初回 commit 用)
- *   3. 既存ならその内容と論理的に一致するか比較 (順序非依存 = JsonElement で比較)
- * を行う。
+ * **モード**:
+ * - 既定 (CI / 通常 `./gradlew :protocol:test`): **verify-only**。
+ *   golden が無いケースは fail (誰かが削除した PR を検出するため)、
+ *   既存と論理一致しなければ fail (drift 検出)。
+ * - 再生成: `-Pgolden.write=true` (Gradle property) または env `PROTOCOL_GOLDEN_WRITE=1`。
+ *   wire shape を意図的に変えた後で 1 回だけ実行 → 差分を commit する。
+ *
+ * **比較セマンティクス**: `Json.parseToJsonElement` 同士の equals。
+ * key 順序 / whitespace に依存しない (pretty-print の見た目が変わっても fail しない)。
  */
 class KotlinGoldenGeneratorTest {
 
     private val goldenRoot: Path =
         Path.of(System.getProperty("user.dir"), "src", "test", "golden", "kotlin")
+
+    private val writeMode: Boolean =
+        System.getProperty("golden.write") == "true" ||
+            System.getenv("PROTOCOL_GOLDEN_WRITE") == "1"
 
     @OptIn(ExperimentalSerializationApi::class)
     private val prettyJson = Json {
@@ -33,26 +41,31 @@ class KotlinGoldenGeneratorTest {
     }
 
     @TestFactory
-    fun `generate or verify golden JSON for every sample`(): List<DynamicTest> =
+    fun `verify (or write with -Pgolden_write=true) golden JSON for every sample`(): List<DynamicTest> =
         WireSamples.all.map { (name, event) ->
             DynamicTest.dynamicTest("$name → kotlin/$name.json") {
-                Files.createDirectories(goldenRoot)
                 val payload = JsonCodec.encode(event).toString(Charsets.UTF_8)
                 val parsed = Json.parseToJsonElement(payload)
-                val pretty = prettyJson.encodeToString(JsonElement.serializer(), parsed)
                 val target = goldenRoot.resolve("$name.json")
 
-                if (!Files.exists(target)) {
+                if (writeMode) {
+                    Files.createDirectories(goldenRoot)
+                    val pretty = prettyJson.encodeToString(JsonElement.serializer(), parsed)
                     Files.writeString(target, pretty + "\n")
                     return@dynamicTest
                 }
 
-                val existing = Files.readString(target)
-                val existingParsed = Json.parseToJsonElement(existing)
+                assertTrue(
+                    Files.exists(target),
+                    "missing golden file: $target (regenerate with " +
+                        "`./gradlew :protocol:test -Pgolden.write=true` or env PROTOCOL_GOLDEN_WRITE=1)",
+                )
+                val existingParsed = Json.parseToJsonElement(Files.readString(target))
                 assertEquals(
                     parsed,
                     existingParsed,
-                    "golden drift in $name. Re-run after deleting protocol/src/test/golden/kotlin/$name.json to regenerate.",
+                    "golden drift in $name. To regenerate intentionally, run " +
+                        "`./gradlew :protocol:test -Pgolden.write=true` then commit the diff.",
                 )
             }
         }

@@ -1,17 +1,11 @@
 // Phone → Hub の `send` で発行する chat_id を採番。
-// Hub 内 in-memory。Hub 再起動でカウンタはリセットされるが、Phone は新しい chat_id を受けるだけ。
+// Phase 2 §4.6 表に従い UUID v4。 Hub 内 in-memory、再起動でカウンタ等の状態は無い。
+
+import { randomUUID } from "node:crypto";
 
 export class ChatRegistry {
-    private nextSeq = 1;
-    private readonly prefix: string;
-
-    constructor(prefix: string = "chat") {
-        this.prefix = prefix;
-    }
-
+    /** UUID v4 を生成して返す。 */
     mint(): string {
-        const id = `${this.prefix}-${this.nextSeq.toString().padStart(6, "0")}`;
-        this.nextSeq += 1;
-        return id;
+        return randomUUID();
     }
 }

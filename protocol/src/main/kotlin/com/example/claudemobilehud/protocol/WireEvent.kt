@@ -5,6 +5,10 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 sealed interface WireEvent {
+    /**
+     * Epoch ミリ秒。JS `Number` の安全範囲 (2^53 - 1) は西暦 287396 年まで余裕があるため、
+     * TS 側で `number` として扱って精度欠落しない。
+     */
     val ts: Long
 }
 
@@ -38,6 +42,10 @@ data class SessionList(
     override val ts: Long,
 ) : WireEvent
 
+/**
+ * 現在 session の切替。`id == null` は **clear** (現在 session 無し) を意味する。
+ * Glass 側受信時は null チェック 1 つで set/clear を分岐できる。
+ */
 @Serializable
 @SerialName("current_session")
 data class CurrentSessionEvent(
@@ -136,6 +144,10 @@ data class SessionSummaryPayload(
 
 @Serializable
 data class ChatMessagePayload(
+    /**
+     * Phone-local HistoryStore の autoinc。実運用で 2^53 (約 9 千兆) に到達することは無いので
+     * TS 側で `number` として安全に扱える。Phase 3 §3.6 の HistoryStore schema 参照。
+     */
     val id: Long,
     val role: MessageRole,
     val text: String,
