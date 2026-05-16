@@ -211,6 +211,32 @@ class AppLifecycleControllerTest {
     }
 
     @Test
+    fun `Running plus glass ON_DESTROY first then mic ON_DESTROY transitions cleanly to Off`() = runTest(UnconfinedTestDispatcher()) {
+        // 4c1 review P2-9: 自然切断時 (onGlassDisconnected → stopGlassFgs / stopMicFgs) で
+        // ON_DESTROY が片方ずつ届く順番に対する不変条件を test で固定する。
+        val (ctrl, _) = newCtrl()
+        ctrl.startGlassSession(ctx)
+        ctrl.onFgsLifecycle(FgsKind.GLASS_CONNECTION, FgsLifecycle.ON_CREATE, ctx)
+        ctrl.onFgsLifecycle(FgsKind.MIC, FgsLifecycle.ON_CREATE, ctx)
+        runCurrent()
+        ctrl.onGlassDisconnected(ctx)
+        runCurrent()
+        assertEquals(GlassFgsState.Stopping(restartAfter = false), ctrl.glassState.value)
+
+        // Glass FGS が先に ON_DESTROY (mic はまだ true)
+        ctrl.onFgsLifecycle(FgsKind.GLASS_CONNECTION, FgsLifecycle.ON_DESTROY, ctx)
+        runCurrent()
+        assertEquals(
+            GlassFgsState.Stopping(restartAfter = false),
+            ctrl.glassState.value,
+            "片方残っている間は Stopping のまま",
+        )
+        ctrl.onFgsLifecycle(FgsKind.MIC, FgsLifecycle.ON_DESTROY, ctx)
+        runCurrent()
+        assertEquals(GlassFgsState.Off, ctrl.glassState.value)
+    }
+
+    @Test
     fun `CHANNEL FgsLifecycle is independent and does not touch glass state`() = runTest(UnconfinedTestDispatcher()) {
         val (ctrl, _) = newCtrl()
         ctrl.startGlassSession(ctx)

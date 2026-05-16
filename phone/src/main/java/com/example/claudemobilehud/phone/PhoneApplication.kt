@@ -5,6 +5,10 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.example.claudemobilehud.phone.data.ChannelRepository
+import com.example.claudemobilehud.phone.glass.BtAudioRouter
+import com.example.claudemobilehud.phone.glass.CapsFactoryImpl
+import com.example.claudemobilehud.phone.glass.GlassEventDispatcher
+import com.example.claudemobilehud.phone.glass.GlassRelay
 import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.phone.service.AppLifecycleController
 import com.example.claudemobilehud.phone.service.ChannelService
@@ -12,6 +16,7 @@ import com.example.claudemobilehud.phone.service.GlassConnectionService
 import com.example.claudemobilehud.phone.service.MicForegroundService
 import com.example.claudemobilehud.phone.service.NotificationFactory
 import com.example.claudemobilehud.phone.service.TokenStore
+import com.example.claudemobilehud.protocol.codec.CapsCodec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,16 +64,34 @@ class PhoneApplication : Application() {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         applicationScope = scope
 
-        val repository = ChannelRepository(applicationContext, scope = scope)
+        val audioRouter = BtAudioRouter(applicationContext)
+        val repository = ChannelRepository(
+            applicationContext = applicationContext,
+            scope = scope,
+            audioRouter = audioRouter,
+        )
         val lifecycle = AppLifecycleController(
             fgsOps = RealFgsOperations(),
             scope = scope,
         )
-        _container = AppContainer(repository = repository, lifecycle = lifecycle)
+        val capsCodec = CapsCodec(CapsFactoryImpl())
+        val glassRelay = GlassRelay(repository, capsCodec)
+        val glassEventDispatcher = GlassEventDispatcher(repository, glassRelay, scope)
+        _container = AppContainer(
+            repository = repository,
+            lifecycle = lifecycle,
+            capsCodec = capsCodec,
+            glassRelay = glassRelay,
+            glassEventDispatcher = glassEventDispatcher,
+        )
 
         scope.launch { repository.initialize() }
         // ChannelService を常駐起動。lifecycle 状態は AppLifecycleController.channelRunning に反映。
         scope.launch { lifecycle.startChannel(applicationContext) }
+        // Glass relay / dispatcher を Application scope で常駐起動。CXR-L sender が
+        // null の間は何も emit しないため早めに start しても副作用は無い。
+        glassRelay.start()
+        glassEventDispatcher.start()
 
         log.info("application_started")
     }
@@ -86,6 +109,9 @@ class PhoneApplication : Application() {
     class AppContainer(
         val repository: ChannelRepository,
         val lifecycle: AppLifecycleController,
+        val capsCodec: CapsCodec,
+        val glassRelay: GlassRelay,
+        val glassEventDispatcher: GlassEventDispatcher,
     )
 
     /**

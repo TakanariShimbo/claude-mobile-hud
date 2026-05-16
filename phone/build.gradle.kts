@@ -54,6 +54,9 @@ kotlin {
 
 dependencies {
     implementation(project(":protocol"))
+    // 4c1: CXR-L (Rokid Glass SDK) ラッパ。GlassConnectionService / GlassRelay /
+    // GlassEventDispatcher が利用。
+    implementation(project(":cxrglobal:lib"))
 
     // Compose
     implementation(platform(libs.androidx.compose.bom))

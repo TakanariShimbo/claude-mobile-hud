@@ -17,8 +17,18 @@
         tools:targetApi="34" />
     <!-- 4b2 で MicCapture が AudioRecord を開く際に必要 -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- 4c の CXR-L 経路で Bluetooth SCO (BT mic) を使う準備 -->
+    <!-- 4c1 CXR-L 経路で Bluetooth SCO (BT mic) を使う準備 -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!--
+      Android 11+ package visibility (targetSdk 30+) で bindService が暗黙的に
+      hidden になるのを回避する。CXRLink.connect は
+      Intent.setPackage("com.rokid.sprite.global.aiapp") を使うため、その package を
+      <queries> で公開する必要がある。Phase 4c1 review P1-1。
+    -->
+    <queries>
+        <package android:name="com.rokid.sprite.global.aiapp" />
+    </queries>
 
     <application
         android:name=".PhoneApplication"
