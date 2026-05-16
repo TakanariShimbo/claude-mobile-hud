@@ -1,0 +1,25 @@
+{
+  "event": "messages",
+  "session_id": "s1",
+  "messages": [
+    {
+      "id": 1,
+      "role": "out",
+      "text": "hi",
+      "chat_id": "c1"
+    },
+    {
+      "id": 2,
+      "role": "in",
+      "text": "hello",
+      "chat_id": "c1"
+    },
+    {
+      "id": 3,
+      "role": "sys",
+      "text": "system note",
+      "chat_id": null
+    }
+  ],
+  "ts": 1700000004000
+}

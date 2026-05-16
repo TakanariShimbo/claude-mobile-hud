@@ -1,0 +1,18 @@
+{
+  "event": "current_state",
+  "seq": 42,
+  "mode": "permission_confirming",
+  "pending_permission": {
+    "request_id": "req-001",
+    "tool_name": "Bash",
+    "description": "Run rm -rf /tmp/cache",
+    "input_preview": "rm -rf /tmp/cache",
+    "session_id": "sess-1",
+    "created_at_ms": 1700000000000
+  },
+  "transcript_state": "listening",
+  "transcript_text": "Hello world",
+  "input_text": "What is foo?",
+  "mic_source": "glass",
+  "ts": 1700000000500
+}

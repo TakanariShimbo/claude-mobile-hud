@@ -1,0 +1,7 @@
+{
+  "event": "notification",
+  "kind": "permission",
+  "text": "permission requested",
+  "session_id": null,
+  "ts": 1700000005500
+}

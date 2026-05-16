@@ -1,0 +1,6 @@
+{
+  "event": "permission_verdict",
+  "request_id": "req-002",
+  "decision": "deny",
+  "ts": 1700000011500
+}

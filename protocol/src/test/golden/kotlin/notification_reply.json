@@ -1,0 +1,7 @@
+{
+  "event": "notification",
+  "kind": "reply",
+  "text": "reply received",
+  "session_id": "s1",
+  "ts": 1700000005000
+}
