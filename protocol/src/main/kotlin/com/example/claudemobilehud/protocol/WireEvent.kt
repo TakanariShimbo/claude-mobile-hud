@@ -79,6 +79,10 @@ data class ErrorEvent(
 
 // --- Glass→Phone ---
 
+// NOTE: 以下の `ts` のみ持つ data class は同 `ts` だと `equals == true`。
+// 設計上 `ts` は単調増加なので衝突しない前提だが、将来 de-dup を入れる場合は
+// (kind, 受信時刻) で判定し、`equals` には依存しないこと。
+
 @Serializable
 @SerialName("hello")
 data class Hello(override val ts: Long) : WireEvent

@@ -8,11 +8,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { ChatRegistry } from "../state/ChatRegistry.js";
-import { OutstandingPermissions, type OutstandingEntry } from "../state/OutstandingPermissions.js";
+import type { OutstandingEntry, OutstandingPermissions } from "../state/OutstandingPermissions.js";
 import { SessionRegistry } from "../state/SessionRegistry.js";
+import { permissionEntryToSse } from "../wire/PhoneWire.js";
 import { SseClients } from "./SseClients.js";
 import { ERROR_CODES, ERROR_HTTP_STATUS, type ErrorCode } from "../wire/ErrorCodes.js";
-import type { HubToBridgeMessage } from "../wire/BridgeWire.js";
 import type {
     PermissionRequest,
     PermissionSnapshotSse,
@@ -22,9 +22,9 @@ import type {
     SessionSnapshotSse,
 } from "../wire/PhoneWire.js";
 import type { Logger } from "../log/StructuredLog.js";
+import type { BridgeDispatcher } from "./BridgeServer.js";
 
-/** Bridge への送信ハンドル (HttpServer は Bridge 実装の詳細に依存しない)。 */
-export type BridgeDispatcher = (sessionId: string, msg: HubToBridgeMessage) => boolean;
+export type { BridgeDispatcher } from "./BridgeServer.js";
 
 export interface HttpServerDeps {
     sessions: SessionRegistry;
@@ -132,14 +132,18 @@ export class HttpServer {
         }
 
         const chatId = this.deps.chats.mint();
-        const sent = this.deps.dispatchToBridge(sessionId, {
+        const dispatch = this.deps.dispatchToBridge(sessionId, {
             type: "send",
             chat_id: chatId,
             text: body.text,
             // image_path: Phase 4 で ImageStaging を入れた段階で結線
         });
-        if (!sent) {
-            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, "session disappeared");
+        if (!dispatch.ok) {
+            this.deps.logger.warn("send_dispatch_failed", {
+                session_id: sessionId,
+                reason: dispatch.reason,
+            });
+            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, `session ${dispatch.reason}`);
             return;
         }
 
@@ -201,22 +205,23 @@ export class HttpServer {
             this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, "verdict target session unknown");
             return false;
         }
-        const sent = this.deps.dispatchToBridge(entry.sessionId, {
+        const result = this.deps.dispatchToBridge(entry.sessionId, {
             type: "permission_verdict",
             request_id: entry.requestId,
             behavior,
         });
-        if (!sent) {
+        if (!result.ok) {
             this.deps.logger.warn("verdict_dispatch_failed", {
                 request_id: entry.requestId,
                 session_id: entry.sessionId,
+                reason: result.reason,
             });
             this.broadcast({
                 type: "permission_abort",
                 request_id: entry.requestId,
-                reason: "dispatch_failed",
+                reason: `dispatch_failed:${result.reason}`,
             });
-            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, "session disappeared");
+            this.sendError(res, ERROR_CODES.SESSION_NOT_ACTIVE, `session ${result.reason}`);
             return false;
         }
         return true;
@@ -245,7 +250,7 @@ export class HttpServer {
         this.sse.send(res, permissionSnapshot);
 
         for (const entry of snap.entries) {
-            this.sse.send(res, OutstandingPermissions.toSse(entry));
+            this.sse.send(res, permissionEntryToSse(entry));
         }
 
         this.deps.logger.info("sse_connect", {

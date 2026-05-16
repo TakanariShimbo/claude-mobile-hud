@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OutstandingPermissions, type OutstandingEntry } from "../src/state/OutstandingPermissions.js";
+import { permissionEntryToSse } from "../src/wire/PhoneWire.js";
 import { SessionRegistry } from "../src/state/SessionRegistry.js";
 import { ChatRegistry } from "../src/state/ChatRegistry.js";
 import type { Socket } from "node:net";
@@ -53,8 +54,9 @@ describe("OutstandingPermissions", () => {
         expect(snap.entries.map((e) => e.requestId)).toEqual(["old", "mid", "new"]);
     });
 
-    it("toSse drops null sessionId", () => {
-        const sse = OutstandingPermissions.toSse(entry({ sessionId: null }));
+    it("permissionEntryToSse drops null sessionId (key omitted, not undefined)", () => {
+        const sse = permissionEntryToSse(entry({ sessionId: null }));
+        expect("session_id" in sse).toBe(false);
         expect(sse.session_id).toBeUndefined();
     });
 });

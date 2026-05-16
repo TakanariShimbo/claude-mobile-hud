@@ -367,7 +367,7 @@ describe("Hub integration", () => {
             sessions,
             chats,
             outstanding,
-            dispatchToBridge: () => false,
+            dispatchToBridge: () => ({ ok: false, reason: "not_registered" }),
             logger,
             token: "secret-xyz",
             sseKeepAliveMs: 60_000,

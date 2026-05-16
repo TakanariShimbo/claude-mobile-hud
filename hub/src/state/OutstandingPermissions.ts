@@ -4,7 +4,7 @@
 // - buildSnapshot (AD-13 / FR-HU-14): SSE 再接続時に Phone へ ID 集合と各 entry を再 push
 // - Hub 再起動時は空 (FR-HU-15) — 永続化しない
 
-import type { PermissionAbortSse, PermissionSse } from "../wire/PhoneWire.js";
+import type { PermissionAbortSse } from "../wire/PhoneWire.js";
 
 export interface OutstandingEntry {
     requestId: string;
@@ -68,16 +68,4 @@ export class OutstandingPermissions {
         };
     }
 
-    /** entry を PermissionSse に変換 (SSE 再 push 用)。session_id が null なら key 自体を省略。 */
-    static toSse(entry: OutstandingEntry): PermissionSse {
-        const base: PermissionSse = {
-            type: "permission",
-            request_id: entry.requestId,
-            tool_name: entry.toolName,
-            description: entry.description,
-            input_preview: entry.inputPreview,
-        };
-        if (entry.sessionId !== null) base.session_id = entry.sessionId;
-        return base;
-    }
 }

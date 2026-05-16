@@ -14,6 +14,18 @@ import type {
     HubToBridgeMessage,
     RegisterMessage,
 } from "../wire/BridgeWire.js";
+
+/**
+ * Bridge への送信結果。失敗 reason は呼び元で扱い分けられるよう discriminated union。
+ * - `not_registered`: 該当 session_id の socket が SessionRegistry に存在しない
+ * - `write_failed`: socket は存在したが write が失敗 (destroyed / 同期 throw 等)
+ */
+export type BridgeDispatchResult =
+    | { readonly ok: true }
+    | { readonly ok: false; readonly reason: "not_registered" | "write_failed" };
+
+/** 別モジュールから注入される dispatch コールバックの型 (HttpServer 側で使用)。 */
+export type BridgeDispatcher = (sessionId: string, msg: HubToBridgeMessage) => BridgeDispatchResult;
 import type {
     PermissionAbortSse,
     PermissionSse,
@@ -73,26 +85,26 @@ export class BridgeServer {
         await new Promise<void>((resolve) => this.server.close(() => resolve()));
     }
 
-    sendToSession(sessionId: string, msg: HubToBridgeMessage): boolean {
+    sendToSession(sessionId: string, msg: HubToBridgeMessage): BridgeDispatchResult {
         const entry = this.deps.sessions.get(sessionId);
-        if (!entry) return false;
+        if (!entry) return { ok: false, reason: "not_registered" };
         return this.writeNdjson(entry.socket, msg);
     }
 
-    private writeNdjson(socket: Socket, msg: HubToBridgeMessage): boolean {
-        if (socket.destroyed || socket.writableEnded) return false;
+    private writeNdjson(socket: Socket, msg: HubToBridgeMessage): BridgeDispatchResult {
+        if (socket.destroyed || socket.writableEnded) return { ok: false, reason: "write_failed" };
         try {
             const ok = socket.write(JSON.stringify(msg) + "\n");
             if (!ok) {
                 this.deps.logger.warn("write_backpressure", { type: msg.type });
             }
-            return true;
+            return { ok: true };
         } catch (err) {
             this.deps.logger.warn("write_failed", {
                 type: msg.type,
                 error: (err as Error).message,
             });
-            return false;
+            return { ok: false, reason: "write_failed" };
         }
     }
 

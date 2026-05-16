@@ -38,10 +38,20 @@ async function main(): Promise<void> {
         logger: root.withTag("bridge"),
     });
 
-    await Promise.all([
-        bridge.listen(config.bridgePort, "127.0.0.1"),
-        http.listen(config.httpPort, "0.0.0.0"),
-    ]);
+    // 片方の listen が失敗した時はもう片方を必ず close してから rethrow。
+    // (port 衝突などで supervisord 再起動を待つ間に socket を残さない。)
+    const bridgeListen = bridge.listen(config.bridgePort, "127.0.0.1");
+    const httpListen = http.listen(config.httpPort, "0.0.0.0");
+    const results = await Promise.allSettled([bridgeListen, httpListen]);
+    const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+    if (failures.length > 0) {
+        // どちらかが listening になっていたら close。Promise.allSettled は fulfilled も識別する。
+        const cleanups: Promise<unknown>[] = [];
+        if (results[0]!.status === "fulfilled") cleanups.push(bridge.close());
+        if (results[1]!.status === "fulfilled") cleanups.push(http.close());
+        await Promise.allSettled(cleanups);
+        throw failures[0]!.reason;
+    }
 
     const shutdown = async (signal: string): Promise<void> => {
         root.info("shutdown", { signal });

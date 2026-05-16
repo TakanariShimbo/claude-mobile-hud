@@ -74,3 +74,25 @@ export type PhoneSseEvent =
     | PermissionSnapshotSse;
 
 export type PhoneSseEventType = PhoneSseEvent["type"];
+
+/**
+ * OutstandingEntry → PermissionSse の純粋変換。state class が型変換責務を持たないよう
+ * ここに置く。session_id が null なら key 自体を省略 (`exactOptionalPropertyTypes` 準拠)。
+ */
+export function permissionEntryToSse(entry: {
+    requestId: string;
+    sessionId: string | null;
+    toolName: string;
+    description: string;
+    inputPreview: string;
+}): PermissionSse {
+    const sse: PermissionSse = {
+        type: "permission",
+        request_id: entry.requestId,
+        tool_name: entry.toolName,
+        description: entry.description,
+        input_preview: entry.inputPreview,
+    };
+    if (entry.sessionId !== null) sse.session_id = entry.sessionId;
+    return sse;
+}
