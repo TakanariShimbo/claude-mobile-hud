@@ -10,6 +10,7 @@ import com.example.claudemobilehud.phone.data.model.PendingPermission
 import com.example.claudemobilehud.phone.data.model.PhoneUiState
 import com.example.claudemobilehud.phone.data.model.Settings
 import com.example.claudemobilehud.phone.data.model.SseEvent
+import com.example.claudemobilehud.phone.data.transcription.TranscriptionClient
 import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.protocol.ConversationMode
 import com.example.claudemobilehud.protocol.CurrentState
@@ -57,20 +58,26 @@ class ChannelRepository(
     private val applicationContext: Context,
     historyFilesDir: File = applicationContext.filesDir,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    audioRouter: InputController.AudioRouter? = null,
 ) {
     private val log = StructuredLog("channel.repo")
     private val settingsStore = SettingsStore(applicationContext)
     private val historyStore = HistoryStore(historyFilesDir)
     private val sessionStore = SessionStore(historyStore)
     private val connection = ConnectionController()
+    // 4b2: input + transcription を InputController に集約。AudioRouter は 4c で注入。
+    // P3-1: UI から transcription を直接駆動できてしまう (`repository.input.transcription.start(...)`)
+    // のは設計外。テスト容易性のため public のまま残すが、ProductionGuard 的な分離は
+    // 4c の MainActivity/ViewModel で隠す。
+    val input: InputController = InputController(audioRouter = audioRouter, scope = scope)
 
     // 公開 flow
     val settings: StateFlow<Settings>
     val connectivity: StateFlow<ConnectivityState> get() = connection.status
     val uiState: StateFlow<PhoneUiState>
 
-    private val _inputText = MutableStateFlow("")
-    val inputText: StateFlow<String> get() = _inputText.asStateFlow()
+    /** 入力欄テキスト。Repository.input.text の facade (互換 API 用)。 */
+    val inputText: StateFlow<String> get() = input.text
 
     private val _attachedImage = MutableStateFlow<ImageAttachment?>(null)
     val attachedImage: StateFlow<ImageAttachment?> get() = _attachedImage.asStateFlow()
@@ -123,22 +130,32 @@ class ChannelRepository(
         // SSE event の処理
         connection.events.onEach(::onSseEvent).launchIn(scope)
 
+        // InputController 由来のエラー (BtScoUnavailable 等) を UI 層に転送する (P1-3 of 4b2)。
+        input.errors
+            .onEach { _errors.tryEmit(TransientError.Phone(it)) }
+            .launchIn(scope)
+
         // 単一 source: currentStateDraft の合成。Phone UI と Glass wire の両方の親。
+        // 4b2 で transcription state / micSource を InputController 由来に切替え。
         scope.launch {
             combine(
                 sessionStore.snapshot,
                 _pendingPermissions,
-                _inputText,
-            ) { sessionSnap, pending, inputText ->
+                input.text,
+                input.transcription.state,
+                input.micSource,
+            ) { sessionSnap, pending, inputText, transState, micSource ->
                 val currentSession = sessionSnap.currentSessionId
                 val pendingForCurrent = pending.firstOrNull { it.sessionId == currentSession }
+                val transcriptState = transState.toWireState()
+                val transcriptText = (transState as? TranscriptionClient.State.Listening)?.partial.orEmpty()
                 CurrentStateDraft(
-                    mode = deriveMode(pendingForCurrent, TranscriptState.IDLE),
+                    mode = deriveMode(pendingForCurrent, transcriptState),
                     pendingPermission = pendingForCurrent?.toWirePayload(),
-                    transcriptState = TranscriptState.IDLE,
-                    transcriptText = "",
+                    transcriptState = transcriptState,
+                    transcriptText = transcriptText,
                     inputText = inputText,
-                    micSource = MicSource.GLASS,
+                    micSource = micSource,
                 )
             }
                 .distinctUntilChanged()
@@ -182,6 +199,7 @@ class ChannelRepository(
         sessionStore.restoreFromHistory()
         val initial = settingsStore.snapshot()
         sessionStore.restoreCurrentSessionId(initial.lastCurrentSessionId)
+        input.setCurrentSession(sessionStore.snapshot.value.currentSessionId)
     }
 
     // --- 公開 action ---
@@ -195,18 +213,41 @@ class ChannelRepository(
     suspend fun selectSession(sessionId: String) {
         sessionStore.selectSession(sessionId)
         settingsStore.saveLastCurrentSessionId(sessionId)
+        input.setCurrentSession(sessionId)
     }
 
     suspend fun deleteSession(sessionId: String) = sessionStore.deleteSession(sessionId)
 
     fun updateInputText(text: String) {
-        _inputText.value = text
+        input.update(text)
     }
 
     fun clearInput() {
-        _inputText.value = ""
+        input.clear()
         _attachedImage.value = null
     }
+
+    // --- transcription 公開 API (Phase 3 §3.2.1.1) ---
+
+    fun startTranscriptionPhoneMic() {
+        val key = settingsFlow.value.openAiApiKey
+        if (key.isBlank()) {
+            _errors.tryEmit(TransientError.Phone(PhoneWireError.Transcription.ApiKeyMissing))
+            return
+        }
+        input.startWithPhoneMic(key)
+    }
+
+    fun startTranscriptionFromGlass() {
+        val key = settingsFlow.value.openAiApiKey
+        if (key.isBlank()) {
+            _errors.tryEmit(TransientError.Phone(PhoneWireError.Transcription.ApiKeyMissing))
+            return
+        }
+        input.startFromGlass(key)
+    }
+
+    fun stopTranscription() = input.stop()
 
     fun attachImage(image: ImageAttachment) {
         _attachedImage.value = image
@@ -222,6 +263,8 @@ class ChannelRepository(
      */
     suspend fun send(text: String) {
         if (text.isBlank() && _attachedImage.value == null) return
+        // 送信開始の時点で transcription 中なら停止 (これ以上の partial を input に書き込まない)。
+        input.stop()
         val sessionId = sessionStore.snapshot.value.currentSessionId
         val image = _attachedImage.value
         // appendOutgoing で UI に即時反映 (UNKNOWN_SESSION_ID 経由になる場合あり)
@@ -274,7 +317,7 @@ class ChannelRepository(
         err: Throwable,
     ) {
         sessionStore.removePendingMessage(pending.id)
-        _inputText.value = text
+        input.update(text)
         if (image != null) _attachedImage.value = image
         emitErrorFromThrowable(err)
     }
@@ -362,6 +405,17 @@ class ChannelRepository(
         pendingForCurrent != null -> ConversationMode.PERMISSION_CONFIRMING
         transcriptState == TranscriptState.LISTENING -> ConversationMode.LISTENING
         else -> ConversationMode.IDLE
+    }
+
+    /**
+     * TranscriptionClient.State (UI / facade 視点) を wire 上の [TranscriptState] へ写像。
+     *   - `Idle` / `Error` → `IDLE` (Error は UI 側で snackbar 等で表示)。
+     *   - `Connecting` → `IDLE` (まだ partial が無いため Glass HUD は通常表示で良い)。
+     *   - `Listening` → `LISTENING`。
+     */
+    private fun TranscriptionClient.State.toWireState(): TranscriptState = when (this) {
+        is TranscriptionClient.State.Listening -> TranscriptState.LISTENING
+        else -> TranscriptState.IDLE
     }
 
     private fun initialDraft(): CurrentStateDraft = CurrentStateDraft(
