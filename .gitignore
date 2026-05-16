@@ -1,0 +1,30 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Android / Gradle (preempt: phase 4 で発生する)
+.gradle/
+build/
+local.properties
+captures/
+*.iml
+
+# Node (hub/bridge 側で発生する想定)
+node_modules/
+*.log
+.env
+.env.local
+
+# Python (もし使うことになったら)
+__pycache__/
+*.pyc
+.venv/
+
+# Generated
+*.tmp
