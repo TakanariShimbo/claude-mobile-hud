@@ -1,0 +1,144 @@
+# 開発環境セットアップ
+
+`claude-mobile-hud` v1.0 の Phase 4 (実装) 着手前に整える環境。Gradle root / Node プロジェクト / CI 雛形 / cxrglobal submodule は既にセットアップ済み。**Phone / Glass の Android サブプロジェクトのみ Android Studio で初期化が必要**。
+
+---
+
+## 1. 前提
+
+- OS: Ubuntu 22.04+ (Linux)
+- IDE: Android Studio (latest stable, バンドル JBR 推奨)
+- Node.js 22+ (nvm 経由を推奨)
+- JDK 17 (Android Studio の JBR を使えば OK)
+- Git
+- `~/Android/Sdk` に Android SDK (Android Studio の SDK Manager から)
+
+JDK / Android SDK パスの環境変数 (Android Studio で開く場合は不要):
+```bash
+export JAVA_HOME=/opt/android-studio/jbr
+export ANDROID_HOME=$HOME/Android/Sdk
+export PATH=$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+```
+
+---
+
+## 2. リポジトリ初期 clone
+
+```bash
+git clone --recurse-submodules https://github.com/TakanariShimbo/claude-mobile-hud.git ~/claude-mobile-hud
+cd ~/claude-mobile-hud
+```
+
+`--recurse-submodules` を忘れた場合:
+```bash
+git submodule update --init --recursive
+```
+
+これで `cxrglobal/` が展開される (CXR-L SDK ラッパー、Glass app の依存)。
+
+---
+
+## 3. Hub / Bridge (Node) のセットアップ
+
+```bash
+( cd hub    && npm install && npm run build && npm test )
+( cd bridge && npm install && npm run build && npm test )
+```
+
+両方とも placeholder smoke test が pass すれば OK (Phase 4 で実テストを書く)。
+
+---
+
+## 4. `:protocol` (Kotlin) のセットアップ
+
+```bash
+./gradlew :protocol:build
+```
+
+(初回は Gradle 9.4.1 と依存ライブラリの DL に数分)。test 内容は空なので **BUILD SUCCESSFUL** が出れば OK。
+
+---
+
+## 5. Phone / Glass の Android スキャフォールド (要 Android Studio)
+
+Phone / Glass は Android Studio の GUI で初期化する (Phase 3 §9.1 / AD-20)。
+
+### 5.1 Phone app
+
+1. Android Studio を起動 → **File → New → New Project**
+2. テンプレ: **Empty Activity** (Compose)
+3. パラメータ:
+   - **Name**: `phone`
+   - **Package name**: `com.example.claudemobilehud.phone`
+   - **Save location**: `~/claude-mobile-hud/phone` (Gradle root のサブディレクトリとして配置)
+   - **Language**: Kotlin
+   - **Minimum SDK**: API 31 (Android 12) — Phase 1 NFR-30 に整合
+   - **Build configuration language**: Kotlin DSL (build.gradle.kts)
+4. **Finish**
+5. **重要**: Wizard が自動生成する `phone/settings.gradle.kts` と `phone/gradlew*`, `phone/gradle/wrapper/` を**削除する** (Gradle root 側を使うため)。
+6. `phone/build.gradle.kts` (アプリ側) を編集して libs.versions.toml の参照に書き換え (Phase 4 着手時)
+7. ルート `settings.gradle.kts` を編集し、`include(":phone")` のコメントを外す
+
+### 5.2 Glass app
+
+Phone と同じ手順で:
+- **Name**: `glass`
+- **Package name**: `com.example.claudemobilehud.glass`
+- **Save location**: `~/claude-mobile-hud/glass`
+- **Minimum SDK**: API 31
+
+ルート `settings.gradle.kts` で `include(":glass")` のコメントを外す。
+
+Glass app は CXR-L SDK (cxrglobal) を依存に持つ。Phase 4 で `glass/build.gradle.kts` に:
+```kotlin
+dependencies {
+    implementation(project(":protocol"))
+    implementation(libs.rokid.cxr.client.l)
+    // cxrglobal submodule をライブラリとして取り込む場合は include(":cxrglobal") も検討
+    // ...
+}
+```
+
+### 5.3 確認
+
+```bash
+./gradlew :phone:assembleDebug :glass:assembleDebug
+```
+
+両方の APK がビルドできれば scaffold は完了。
+
+---
+
+## 6. CI
+
+`.github/workflows/ci.yml` は以下を実行:
+
+- `:protocol` の Gradle build + test
+- `hub` の npm build + test
+- `bridge` の npm build + test
+
+Phone / Glass の lint / unit test は `ci.yml` 内でコメントアウトされている (scaffold 後に有効化)。
+
+---
+
+## 7. 既知の注意点
+
+- **Gradle 9.4.1** を Wrapper で固定。`./gradlew --version` でバージョン確認可能
+- **JAVA_HOME**: Android Studio バンドル JBR を export しないと `./gradlew` 直叩きで「JAVA_HOME is not set」エラー
+- **Android SDK パス**: `local.properties` (gitignore 済み) で `sdk.dir=/path/to/sdk` を設定。Android Studio 経由なら自動生成
+- **cxrglobal submodule**: clone 時に `--recurse-submodules` を忘れると Glass app のビルドが失敗する
+- **Compose compiler**: Kotlin 2.x なので Plugin 経由 (`kotlin-compose` plugin)。POC とは設定が違うので注意
+
+---
+
+## 8. Phase 4 着手チェックリスト
+
+- [ ] `git clone --recurse-submodules` で本リポジトリと cxrglobal を取得
+- [ ] `( cd hub && npm install )` + `( cd bridge && npm install )` 成功
+- [ ] `./gradlew :protocol:build` 成功
+- [ ] Phone app を Android Studio で scaffold + Gradle root に統合
+- [ ] Glass app を Android Studio で scaffold + Gradle root に統合
+- [ ] `./gradlew assembleDebug` が phone / glass 両方で成功
+- [ ] CI yaml の Phone / Glass lint コメントを外す
+
+これらが揃えば Phase 4 (`:protocol` から実装開始) に進める。

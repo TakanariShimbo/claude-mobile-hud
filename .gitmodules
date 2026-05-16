@@ -1,0 +1,3 @@
+[submodule "cxrglobal"]
+	path = cxrglobal
+	url = https://github.com/TakanariShimbo/CxrGlobal.git

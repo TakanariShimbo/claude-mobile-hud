@@ -1845,17 +1845,23 @@ include(":protocol", ":phone", ":glass")
 
 ### 10.2 Phase 4 開始時に確定すべき技術スタック
 
-| 項目 | 推奨 |
+Phase 4 着手前準備で確定済み (`gradle/libs.versions.toml` 参照):
+
+| 項目 | バージョン |
 |---|---|
-| Kotlin | 2.x latest stable |
-| Gradle / AGP | 8.x latest stable |
-| kotlinx.serialization | latest stable |
-| OkHttp | latest stable |
-| Compose BOM | latest stable |
-| Node / TypeScript | Node 22 / TypeScript 5.x |
-| Vitest | latest stable |
-| JUnit | 5.x |
-| Turbine | latest stable |
+| Kotlin | 2.2.10 |
+| Gradle / AGP | 9.4.1 / 9.2.1 |
+| Compose BOM | 2026.02.01 |
+| kotlinx.serialization | 1.7.3 |
+| kotlinx.coroutines | 1.9.0 |
+| OkHttp | 5.1.0 |
+| DataStore | 1.1.1 |
+| Security Crypto | 1.1.0-alpha06 |
+| JDK toolchain | 21 (Android Studio バンドル JBR) |
+| Node / TypeScript | 22+ / 5.6+ |
+| Vitest | 2.1 |
+| JUnit Jupiter | 5.11.3 |
+| Turbine | 1.1.0 |
 
 ### 10.3 完了基準 (Phase 4 → Phase 5 移行条件)
 

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# claude-mobile-hud — dispatcher CLI (POC の `claude-channel` に相当)
+# Phase 4 で本実装。
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+    hub)
+        cd "$ROOT/hub"
+        # Phase 4: tsx でデーモン起動
+        echo "[claude-mobile-hud] hub: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    pair)
+        # Phase 4: QR を端末に表示
+        echo "[claude-mobile-hud] pair: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    run)
+        # Phase 4: Claude Code セッションを起動 (safe / yolo モード)
+        echo "[claude-mobile-hud] run: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    resume)
+        # Phase 4: cwd-scoped resume picker
+        echo "[claude-mobile-hud] resume: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    list-sessions)
+        # Phase 4: cwd-scoped session listing
+        echo "[claude-mobile-hud] list-sessions: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    rotate-token)
+        # Phase 3 AD-07: hub/.env を上書き + Hub 再起動
+        echo "[claude-mobile-hud] rotate-token: not yet implemented (Phase 4)" >&2
+        exit 1
+        ;;
+    help|--help|-h)
+        cat <<EOF
+claude-mobile-hud — PC の Claude Code をモバイル/HUD から操作する
+
+USAGE:
+    claude-mobile-hud <command> [args...]
+
+COMMANDS:
+    hub                    Hub daemon を起動
+    pair [lan|ts]          phone とペアリングするための QR を表示
+    run [safe|yolo]        Claude Code セッションを起動
+    resume                 cwd-scoped session resume picker
+    list-sessions          cwd-scoped session listing
+    rotate-token           Hub の X-Token を再生成
+    help                   このメッセージ
+EOF
+        ;;
+    *)
+        echo "Unknown command: $CMD" >&2
+        echo "Run 'claude-mobile-hud help' for usage." >&2
+        exit 1
+        ;;
+esac

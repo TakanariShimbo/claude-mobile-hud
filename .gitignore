@@ -17,9 +17,13 @@ captures/
 
 # Node (hub/bridge 側で発生する想定)
 node_modules/
+dist/
 *.log
 .env
 .env.local
+package-lock.json
+# ↑ Phase 4 で CI を回す段階で package-lock.json は commit したくなる可能性大。
+# その時に gitignore から外して規約化する。
 
 # Python (もし使うことになったら)
 __pycache__/

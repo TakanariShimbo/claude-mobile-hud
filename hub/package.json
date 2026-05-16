@@ -1,0 +1,23 @@
+{
+  "name": "claude-mobile-hud-hub",
+  "version": "0.0.1",
+  "description": "Long-lived Node daemon. Phone と HTTP/SSE で通信し、Bridge との loopback IPC を中継する。Phase 3 §5 参照。",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
