@@ -1,5 +1,9 @@
 package com.example.claudemobilehud.phone.ui.dialogs
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
@@ -14,6 +18,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.claudemobilehud.phone.MainActivity
 import com.example.claudemobilehud.phone.PhoneApplication
@@ -42,6 +47,19 @@ fun GlassDialog(onDismiss: () -> Unit) {
     val glassState by lifecycle.glassState.collectAsStateWithLifecycle()
     val cxrState by GlassConnectionService.connState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+
+    // Mic FGS は Android 14+ で RECORD_AUDIO runtime 権限取得済みが必須 (targetSDK=36 で
+    // 更に厳格化、未取得で startForeground(MICROPHONE) を呼ぶと SecurityException で
+    // クラッシュ)。「接続」押下時に未取得なら runtime permission を取り、grant 後に
+    // startGlassSession に進む経路にする。拒否時は何もしない (ユーザは Settings 経由で
+    // 許可してから再度押せば良い)。
+    val micPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            scope.launch { lifecycle.startGlassSession(context) }
+        }
+    }
 
     val hasToken = !storedToken.isNullOrBlank()
     // P2-G of 4c2 review: 表示 label と button 分岐の真実値は lifecycle.glassState に
@@ -97,7 +115,17 @@ fun GlassDialog(onDismiss: () -> Unit) {
                 ) { Text("切断") }
 
                 else -> FilledTonalButton(
-                    onClick = { scope.launch { lifecycle.startGlassSession(context) } },
+                    onClick = {
+                        val micGranted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (micGranted) {
+                            scope.launch { lifecycle.startGlassSession(context) }
+                        } else {
+                            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                        }
+                    },
                 ) { Text("接続") }
             }
         },

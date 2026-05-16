@@ -1,10 +1,15 @@
 package com.example.claudemobilehud.phone.service
 
+import android.Manifest
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.claudemobilehud.phone.PhoneApplication
 import com.example.claudemobilehud.phone.log.StructuredLog
 
@@ -27,6 +32,27 @@ class MicForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // Android 14+ の FGS-microphone hardening (targetSDK=36 で更に厳格): RECORD_AUDIO
+        // runtime 権限取得済み + app が foreground (STARTED 以上) でなければ
+        // `startForeground(MICROPHONE)` は SecurityException で死ぬ。事前に GlassDialog
+        // で grant を取る運用にしているが、OS triggered restart や mid-session の
+        // 権限 revoke 等の edge case で onCreate が走るケースを **defensive に潰す**
+        // (POC `MicForegroundService.start()` companion guard の移植)。
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            log.warn("mic_fgs_skipped", "reason" to "record_audio_not_granted")
+            stopSelf()
+            return
+        }
+        val state = ProcessLifecycleOwner.get().lifecycle.currentState
+        if (!state.isAtLeast(Lifecycle.State.STARTED)) {
+            log.warn("mic_fgs_skipped", "reason" to "app_not_foreground", "state" to state.name)
+            stopSelf()
+            return
+        }
         startForegroundCompat()
         notifyLifecycle(AppLifecycleController.FgsLifecycle.ON_CREATE)
         log.info("on_create")

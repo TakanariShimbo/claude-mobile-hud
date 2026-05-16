@@ -1,9 +1,13 @@
 package com.example.claudemobilehud.phone
 
+import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.example.claudemobilehud.phone.data.ChannelRepository
 import com.example.claudemobilehud.phone.glass.BtAudioRouter
 import com.example.claudemobilehud.phone.glass.CapsFactoryImpl
@@ -139,6 +143,34 @@ class PhoneApplication : Application() {
             context.stopService(Intent(context, GlassConnectionService::class.java))
         }
         override fun startMicFgs(context: Context) {
+            // FGS-microphone は Android 14+ で RECORD_AUDIO runtime granted + app foreground
+            // でなければ `startForeground(MICROPHONE)` が SecurityException で落ちる
+            // (targetSDK=36 で更に厳格化)。`startForegroundService` を呼んだ後 5s 以内に
+            // `startForeground` を呼ばないと ForegroundServiceDidNotStartInTimeException も
+            // 飛ぶので、**dispatcher 段階で eligibility を判定** し、不適合なら
+            // `startForegroundService` 自体を呼ばない (POC `MicForegroundService.start()`
+            // companion guard と同じ配置)。`MicForegroundService.onCreate` 側にも同じ guard
+            // を残しているが、そちらは OS triggered restart 等の double-defense。
+            val granted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!granted) {
+                StructuredLog("channel.lifecycle").warn(
+                    "mic_fgs_dispatcher_skipped",
+                    "reason" to "record_audio_not_granted",
+                )
+                return
+            }
+            val state = ProcessLifecycleOwner.get().lifecycle.currentState
+            if (!state.isAtLeast(Lifecycle.State.STARTED)) {
+                StructuredLog("channel.lifecycle").warn(
+                    "mic_fgs_dispatcher_skipped",
+                    "reason" to "app_not_foreground",
+                    "state" to state.name,
+                )
+                return
+            }
             ContextCompat.startForegroundService(
                 context,
                 Intent(context, MicForegroundService::class.java),
