@@ -52,6 +52,17 @@ class CapsFactoryImpl(
 
     override fun decode(bytes: ByteArray): WireEvent? = runCatching {
         val caps = Caps.fromBytes(bytes) ?: return@runCatching null
+        decodeFromCaps(caps)
+    }.getOrNull()
+
+    /**
+     * Caps を直接受け取って WireEvent に decode する。Glass 側受信経路の
+     * `CXRServiceBridge.MsgCallback.onReceive(name, args: Caps?, bytes: ByteArray?)` は
+     * **`bytes` を常に null で渡し、ペイロードは `args` (Caps) に入れて届ける** (実機確認済)。
+     * `decode(ByteArray)` で受けると bytes が null で silent drop されて Phone↔Glass の wire
+     * が一切 dispatch されない (Phase 4 step 5b 実機テストで本症状を踏んだ)。
+     */
+    fun decodeFromCaps(caps: Caps): WireEvent? = runCatching {
         if (caps.size() < 2) return@runCatching null
         val keyValue = caps.at(0) ?: return@runCatching null
         val payloadValue = caps.at(1) ?: return@runCatching null

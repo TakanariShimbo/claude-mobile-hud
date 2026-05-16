@@ -24,7 +24,6 @@ import com.example.claudemobilehud.protocol.SessionList
 import com.example.claudemobilehud.protocol.SessionOpen
 import com.example.claudemobilehud.protocol.SessionSummaryPayload
 import com.example.claudemobilehud.protocol.WireEvent
-import com.example.claudemobilehud.protocol.codec.CapsCodec
 import com.rokid.cxr.CXRServiceBridge
 import com.rokid.cxr.Caps
 import kotlinx.coroutines.channels.BufferOverflow
@@ -65,7 +64,6 @@ object GlassBridge {
     @Volatile
     private var bridge: CXRServiceBridge? = null
     private val capsFactory: CapsFactoryImpl = CapsFactoryImpl()
-    private val codec: CapsCodec = CapsCodec(capsFactory)
 
     enum class Status { DISCONNECTED, CONNECTING, CONNECTED }
 
@@ -148,18 +146,21 @@ object GlassBridge {
             })
             subscribe(CHANNEL_FROM_PHONE, object : CXRServiceBridge.MsgCallback {
                 override fun onReceive(name: String?, args: Caps?, bytes: ByteArray?) {
+                    // CXRServiceBridge は `bytes` を常に null で呼び、ペイロードは `args`
+                    // (Caps) で渡してくる (実機確認済、POC も args 経由)。`bytes ?: return`
+                    // 経路だと Phone から来る wire event が全部 silent drop される。
+                    val caps = args ?: return
                     // CXR binder thread から呼ばれる。state 更新は main thread に集約。
-                    val payload = bytes ?: return
-                    mainHandler.post { dispatchPayload(payload) }
+                    mainHandler.post { dispatchCaps(caps) }
                 }
             })
         }
     }
 
-    private fun dispatchPayload(payload: ByteArray) {
-        val event = codec.decode(payload)
+    private fun dispatchCaps(caps: Caps) {
+        val event = capsFactory.decodeFromCaps(caps)
         if (event == null) {
-            log.warn("glass_drop_unknown_payload", "bytes" to payload.size)
+            log.warn("glass_drop_unknown_payload", "caps_size" to caps.size())
             return
         }
         handleWireEvent(event)
