@@ -87,6 +87,15 @@ class ChannelRepository(
     val pendingPermissions: StateFlow<List<PendingPermission>> get() = _pendingPermissions.asStateFlow()
 
     /**
+     * session 単位の「送信確認モード」フラグ (POC port)。Glass の TAP (Listening 停止)
+     * で当該 session を true、SWIPE_FORWARD/SWIPE_BACK (送信/取消) もしくは send 成功で
+     * false に倒す。session を跨いでも保持されるので、別 session で作業して戻ってきた
+     * 際に未確定の Confirming 状態が復元される。優先順位は LISTENING > PERMISSION_CONFIRMING
+     * > CONFIRMING > IDLE (POC と同じ — 録音中は permission/confirming で上書きしない)。
+     */
+    private val _confirmingBySession = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
+    /**
      * 一過性 channel event。replay=0 を意図的に維持している:
      *   - ChannelService の collector は Application.onCreate で attach されるので、
      *     新規 SSE event 到着前に subscribe されている契約。
@@ -138,20 +147,30 @@ class ChannelRepository(
 
         // 単一 source: currentStateDraft の合成。Phone UI と Glass wire の両方の親。
         // 4b2 で transcription state / micSource を InputController 由来に切替え。
+        // POC 移植: `_confirmingBySession` も入力に加えるが、`combine` 5 引数 lambda の
+        // 限界を超えるので「入力 (transcription/inputText/micSource) と外部 state (session/
+        // pending/confirming) の 2 つの combine を nested に重ねる」形にする。型安全 + 既存
+        // 構造との整合性のため、Pair / data class は導入しない。
         scope.launch {
-            combine(
-                sessionStore.snapshot,
-                _pendingPermissions,
+            val inputs = combine(
                 input.text,
                 input.transcription.state,
                 input.micSource,
-            ) { sessionSnap, pending, inputText, transState, micSource ->
+            ) { text, transState, micSource -> Triple(text, transState, micSource) }
+            combine(
+                sessionStore.snapshot,
+                _pendingPermissions,
+                _confirmingBySession,
+                inputs,
+            ) { sessionSnap, pending, confirmingMap, inputTriple ->
+                val (inputText, transState, micSource) = inputTriple
                 val currentSession = sessionSnap.currentSessionId
                 val pendingForCurrent = pending.firstOrNull { it.sessionId == currentSession }
                 val transcriptState = transState.toWireState()
                 val transcriptText = (transState as? TranscriptionClient.State.Listening)?.partial.orEmpty()
+                val confirmingForCurrent = currentSession?.let { confirmingMap[it] } == true
                 CurrentStateDraft(
-                    mode = deriveMode(pendingForCurrent, transcriptState),
+                    mode = deriveMode(pendingForCurrent, transcriptState, confirmingForCurrent),
                     pendingPermission = pendingForCurrent?.toWirePayload(),
                     transcriptState = transcriptState,
                     transcriptText = transcriptText,
@@ -218,6 +237,20 @@ class ChannelRepository(
     }
 
     suspend fun deleteSession(sessionId: String) = sessionStore.deleteSession(sessionId)
+
+    /**
+     * 指定 session の「送信確認モード」flag を更新 (POC port)。
+     * `sessionId == null` のときは current。`GlassEventDispatcher` が gesture handler から呼ぶ:
+     *   - Listening → TAP 停止時に `setConfirming(currentSession, true)` → CONFIRMING mode 出現
+     *   - SWIPE_FORWARD/BACK で `setConfirming(currentSession, false)` → IDLE / 次 mode へ
+     * `send()` 成功時にも flag を畳む (送信完了で確認モード終了)。
+     */
+    fun setConfirming(sessionId: String?, value: Boolean) {
+        val id = sessionId ?: sessionStore.snapshot.value.currentSessionId ?: return
+        _confirmingBySession.update { map ->
+            if (value) map + (id to true) else map - id
+        }
+    }
 
     fun updateInputText(text: String) {
         input.update(text)
@@ -334,6 +367,16 @@ class ChannelRepository(
                 // FR-PH-55: pending (UNKNOWN bucket / chatId=null) に chat_id + session_id を貼る。
                 // これで後続 SseEvent.Reply の SessionStore.mergeUnknownSession が正規 session へ移送できる。
                 sessionStore.assignChatIdToPending(pending.id, resp.chatId, resp.sessionId)
+                // POC port: 送信成功で当該 session の confirming flag を畳む (Glass の
+                // CONFIRMING UI から抜ける)。失敗時は handleSendFailure 経由で input が
+                // 復元されるので flag は維持する (再送できる状態のままにする)。
+                // P2-B of review: `resp.sessionId` (Hub mint された正規 id) を優先し、
+                // null の場合のみ送信時の `sessionId` snapshot に fallback する。
+                // 理由: send() 開始時点で session 未確定 (UNKNOWN bucket) → Hub が新規
+                // session を mint した経路では、setConfirming は新 id 側で false にしないと
+                // confirming flag が古い `sessionId == null` キーに残り続け、後で session
+                // が正規化された時に CONFIRMING UI が残留する。
+                resp.sessionId?.let { setConfirming(it, false) } ?: setConfirming(sessionId, false)
                 _events.tryEmit(ChannelEvent.Sent(resp.chatId, pending.id))
             }
             .onFailure { err -> handleSendFailure(pending, text, image, err) }
@@ -401,6 +444,10 @@ class ChannelRepository(
                     if (current.any { it.requestId == event.requestId }) current
                     else current + pending
                 }
+                // POC port: 現在 mode が IDLE のときだけ別 session の permission に auto-switch
+                // (ユーザが録音/確認中/別 permission 対応中なら邪魔しない gating)。
+                // sessionId が null (Hub-side で session 未確定) は対象外。
+                event.sessionId?.let { maybeAutoSwitchSession(it) }
                 _events.tryEmit(ChannelEvent.PermissionRequested(pending))
             }
             is SseEvent.PermissionAbort -> {
@@ -413,10 +460,37 @@ class ChannelRepository(
                 )
             }
             is SseEvent.Reply -> {
+                // POC port: Reply auto-switch も permission と同じ gating。session_id が無い
+                // (UNKNOWN_SESSION_ID 経路) reply は対象外。
+                event.sessionId?.let { maybeAutoSwitchSession(it) }
                 _events.tryEmit(ChannelEvent.Reply(event.chatId, event.sessionId, event.text))
             }
             else -> Unit
         }
+    }
+
+    /**
+     * POC port: IDLE のときだけ別 session に切替える。録音中 (LISTENING) / 送信確認中
+     * (CONFIRMING) / 権限確認中 (PERMISSION_CONFIRMING) は触らない。同じ session への
+     * 切替は noop。
+     *
+     * P2-C of review: 呼び出し順との関係について。本関数は `_pendingPermissions.update {...}`
+     * 直後 (Permission 経路) または SessionStore 適用直後 (Reply 経路) に呼ばれる。
+     * `_draft.value.mode` は combine 経由で非同期更新だが、判定は下記の通り安全:
+     *   - `targetSessionId == current` の場合は冒頭 early-return で抜ける。
+     *   - `target != current` の場合、新規 pending は `pendingForCurrent` には入らない
+     *     (current の filter で落ちる) ため、permission 追加で current の mode が
+     *     `PERMISSION_CONFIRMING` に変わることはなく、`_draft.value.mode` の遅延が
+     *     ここでの IDLE 判定を誤らせる経路は存在しない。
+     *   - Reply 経路は mode に影響しないので同様に安全。
+     * つまり _draft の更新タイミングに関係なく、ここで観測する mode は target への切替を
+     * 抑止すべきかどうかの正しい判断材料になる。
+     */
+    private suspend fun maybeAutoSwitchSession(targetSessionId: String) {
+        val current = sessionStore.snapshot.value.currentSessionId
+        if (current == targetSessionId) return
+        if (_draft.value.mode != ConversationMode.IDLE) return
+        selectSession(targetSessionId)
     }
 
     private fun emitErrorFromThrowable(err: Throwable) {
@@ -431,12 +505,18 @@ class ChannelRepository(
         _errors.tryEmit(transient)
     }
 
+    /**
+     * Mode の優先順位 (POC と同じ): `LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE`。
+     * 録音中はユーザの作業を邪魔しないため permission / confirming で上書きしない設計。
+     */
     private fun deriveMode(
         pendingForCurrent: PendingPermission?,
         transcriptState: TranscriptState,
+        confirmingForCurrent: Boolean,
     ): ConversationMode = when {
-        pendingForCurrent != null -> ConversationMode.PERMISSION_CONFIRMING
         transcriptState == TranscriptState.LISTENING -> ConversationMode.LISTENING
+        pendingForCurrent != null -> ConversationMode.PERMISSION_CONFIRMING
+        confirmingForCurrent -> ConversationMode.CONFIRMING
         else -> ConversationMode.IDLE
     }
 
