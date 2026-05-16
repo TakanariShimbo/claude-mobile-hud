@@ -68,7 +68,7 @@ Phone / Glass は Android Studio の GUI で初期化する (Phase 3 §9.1 / AD-
 1. Android Studio を起動 → **File → New → New Project**
 2. テンプレ: **Empty Activity** (Compose)
 3. パラメータ:
-   - **Name**: `phone`
+   - **Name**: `phone` (これがディレクトリ名 + 初期 app 名になる。app 表示名は手順 6 で書き換える)
    - **Package name**: `com.example.claudemobilehud.phone`
    - **Save location**: `~/claude-mobile-hud/phone` (Gradle root のサブディレクトリとして配置)
    - **Language**: Kotlin
@@ -76,8 +76,14 @@ Phone / Glass は Android Studio の GUI で初期化する (Phase 3 §9.1 / AD-
    - **Build configuration language**: Kotlin DSL (build.gradle.kts)
 4. **Finish**
 5. **重要**: Wizard が自動生成する `phone/settings.gradle.kts` と `phone/gradlew*`, `phone/gradle/wrapper/` を**削除する** (Gradle root 側を使うため)。
-6. `phone/build.gradle.kts` (アプリ側) を編集して libs.versions.toml の参照に書き換え (Phase 4 着手時)
-7. ルート `settings.gradle.kts` を編集し、`include(":phone")` のコメントを外す
+6. **app 表示名を変更**: `phone/app/src/main/res/values/strings.xml` を編集し、`app_name` を `"Claude Mobile HUD Host"` に書き換える:
+   ```xml
+   <resources>
+       <string name="app_name">Claude Mobile HUD Host</string>
+   </resources>
+   ```
+7. `phone/build.gradle.kts` (アプリ側) を編集して libs.versions.toml の参照に書き換え (Phase 4 着手時)
+8. ルート `settings.gradle.kts` を編集し、`include(":phone")` のコメントを外す
 
 ### 5.2 Glass app
 
@@ -86,6 +92,13 @@ Phone と同じ手順で:
 - **Package name**: `com.example.claudemobilehud.glass`
 - **Save location**: `~/claude-mobile-hud/glass`
 - **Minimum SDK**: API 31
+
+app 表示名を `glass/app/src/main/res/values/strings.xml` で `"Claude Mobile HUD Client"` に変更:
+```xml
+<resources>
+    <string name="app_name">Claude Mobile HUD Client</string>
+</resources>
+```
 
 ルート `settings.gradle.kts` で `include(":glass")` のコメントを外す。
 
@@ -98,6 +111,18 @@ dependencies {
     // ...
 }
 ```
+
+### 5.3 ブランド名の補足
+
+- アプリの表示名 (ランチャー / 通知): **`Claude Mobile HUD Host`** / **`Claude Mobile HUD Client`**
+- パッケージ名 (内部識別): `com.example.claudemobilehud.phone` / `.glass`
+- ディレクトリ名: `phone/` / `glass/` (Gradle root の中で)
+- ドキュメント / リポジトリ名: `claude-mobile-hud`
+
+「Host」= PC 側 Hub に対する**端末側のハブ** (Phone が中継拠点)。
+「Client」= Phone に対する**ウェアラブル端末** (Glass はジェスチャ / HUD 表示専門)。
+
+POC では package が `host` / `client` だったが、v2 では package を `phone` / `glass` (役割名ではなく物理デバイス名) に変更している。表示名は引き続き Host / Client を使うことで、技術的な責務 (どちらが state を持つか) が表現される。
 
 ### 5.3 確認
 
