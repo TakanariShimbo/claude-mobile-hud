@@ -1,15 +1,20 @@
 package com.example.claudemobilehud.phone
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.phone.service.NotificationFactory
@@ -37,9 +42,19 @@ class MainActivity : ComponentActivity() {
     /** 通知タップから来た「次に表示すべき session id」。null 化前提で 1 回消費。 */
     private var pendingSessionId by mutableStateOf<String?>(null)
 
+    // POST_NOTIFICATIONS は Android 13+ で runtime permission。未許可だと OS が通知を
+    // silent drop するため、reply/permission 通知が一切 Phone に出ない。POC `MainActivity.
+    // ensureNotificationPermission` の移植。callback は log のみ (拒否時は user が Settings
+    // 経由で許可する想定)。
+    @Suppress("InvalidFragmentVersionForActivityResult")
+    private val notificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted -> log.info("post_notifications_grant", "granted" to granted) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ensureNotificationPermission()
         // 起動 intent からも session id を回収 (kill 状態で通知タップ起動された経路)。
         pendingSessionId = intent?.extractSessionId()
 
@@ -85,6 +100,15 @@ class MainActivity : ComponentActivity() {
                 AuthResult.AuthFail -> log.warn("auth_failed")
             }
         }
+    }
+
+    private fun ensureNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun Intent.extractSessionId(): String? =
