@@ -3,6 +3,7 @@ package com.example.claudemobilehud.phone.data
 import android.content.Context
 import com.example.claudemobilehud.phone.data.error.PhoneWireError
 import com.example.claudemobilehud.phone.data.error.TransientError
+import com.example.claudemobilehud.phone.data.model.ChatMessage
 import com.example.claudemobilehud.phone.data.model.ConnectivityState
 import com.example.claudemobilehud.phone.data.model.ImageAttachment
 import com.example.claudemobilehud.phone.data.model.PendingPermission
@@ -13,6 +14,7 @@ import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.protocol.ConversationMode
 import com.example.claudemobilehud.protocol.CurrentState
 import com.example.claudemobilehud.protocol.MicSource
+import com.example.claudemobilehud.protocol.PendingPermissionPayload
 import com.example.claudemobilehud.protocol.PermissionDecision
 import com.example.claudemobilehud.protocol.TranscriptState
 import com.example.claudemobilehud.protocol.error.SharedWireError
@@ -28,28 +30,27 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Phase 3 §3.2.1 の data 層 facade。
  *
- * 4a (今コミット) の範囲:
- *   - SettingsStore / HistoryStore / SessionStore / ConnectionController / ChannelClient を組み立て
- *   - SSE event を内部状態へ反映
- *   - `currentState: StateFlow<CurrentState>` を combine + collector-level seq で生成 (NFR-13)
- *   - send / respondPermission / selectSession / updateInputText / clearInput / saveSettings /
- *     reconnect / flushHistory を公開
+ * **Atomicity 戦略 (NFR-13)**:
+ * 単一の `currentStateDraft: StateFlow<CurrentStateDraft>` を内部 source of truth として持つ。
+ *   - `currentState` (Glass wire 用) はこれに collector-level seq を被せる
+ *   - `uiState` (Phone UI 用) はこれに sessions/messages/attachedImage/connectivity を merge する
+ * これにより mode の Phone UI 観測と Glass wire push が同じ draft 値から派生するため、
+ * 1 描画フレーム内で乖離しない (P1-7 / 設計書 §4.5.1)。
  *
  * 4b 以降で組み込む (現状 stub):
  *   - transcription (TranscriptionClient): transcriptState は常に IDLE
- *   - image staging (ImageProcessor): attachImage は path をそのまま保持
- *   - confirming gesture: confirmingBySession は常に空
+ *   - image staging (ImageProcessor): attachImage は path のみ保持
+ *   - confirming gesture: 4b で mode に追加
  *   - mic source: GLASS 固定 (BT SCO 失敗時の PHONE_FALLBACK 切替は 4b)
  */
 class ChannelRepository(
@@ -57,7 +58,7 @@ class ChannelRepository(
     historyFilesDir: File = applicationContext.filesDir,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
-    private val log = StructuredLog("mhud.repo")
+    private val log = StructuredLog("channel.repo")
     private val settingsStore = SettingsStore(applicationContext)
     private val historyStore = HistoryStore(historyFilesDir)
     private val sessionStore = SessionStore(historyStore)
@@ -89,24 +90,22 @@ class ChannelRepository(
     )
     val errors: SharedFlow<TransientError> = _errors.asSharedFlow()
 
-    /**
-     * `currentState` (= Glass 向け wire push の正本)。collector 内で seq を 1 ずつ採番。
-     * NFR-13 / AD-03。Phase 3 §3.2.1.2。
-     */
+    /** 内部の単一 source: mode/pending/transcript/input/micSource の論理スナップショット。 */
+    private val _draft = MutableStateFlow(initialDraft())
+
     private val seqCounter = AtomicInteger(0)
     private val _currentState = MutableStateFlow(initialCurrentState())
     val currentState: StateFlow<CurrentState> = _currentState.asStateFlow()
 
-    private val settingsFlow: StateFlow<Settings>
+    private val settingsFlow = MutableStateFlow(Settings())
 
     init {
-        settingsFlow = MutableStateFlow(Settings())
-        settings = settingsFlow
+        settings = settingsFlow.asStateFlow()
 
+        // Settings → SettingsStore + ConnectionController に流す
         scope.launch {
-            // Settings の hot stream を内部に流す
             settingsStore.settings.collect { newSettings ->
-                (settingsFlow as MutableStateFlow).value = newSettings
+                settingsFlow.value = newSettings
                 connection.update(newSettings)
             }
         }
@@ -114,43 +113,18 @@ class ChannelRepository(
         // SSE event の処理
         connection.events.onEach(::onSseEvent).launchIn(scope)
 
-        // uiState の合成
-        uiState = combine(
-            sessionStore.snapshot,
-            _pendingPermissions,
-            _inputText,
-            _attachedImage,
-            connectivity,
-        ) { sessionSnap, pending, input, image, conn ->
-            PhoneUiState(
-                sessions = sessionSnap.sessions,
-                currentSessionId = sessionSnap.currentSessionId,
-                messages = sessionSnap.messages,
-                pendingPermissions = pending,
-                inputText = input,
-                attachedImage = image,
-                mode = deriveMode(sessionSnap.currentSessionId, pending, TranscriptState.IDLE),
-                transcriptText = "",
-                connectivity = conn,
-            )
-        }.distinctUntilChanged().let { flow ->
-            val initial = PhoneUiState()
-            val state = MutableStateFlow(initial)
-            flow.onEach { state.value = it }.launchIn(scope)
-            state.asStateFlow()
-        }
-
-        // currentState の合成 (§3.2.1.2)
+        // 単一 source: currentStateDraft の合成。Phone UI と Glass wire の両方の親。
         scope.launch {
             combine(
-                sessionStore.snapshot.map { it.currentSessionId },
+                sessionStore.snapshot,
                 _pendingPermissions,
                 _inputText,
-            ) { currentSession, pending, inputText ->
+            ) { sessionSnap, pending, inputText ->
+                val currentSession = sessionSnap.currentSessionId
+                val pendingForCurrent = pending.firstOrNull { it.sessionId == currentSession }
                 CurrentStateDraft(
-                    mode = deriveMode(currentSession, pending, TranscriptState.IDLE),
-                    pendingPermission = pending.firstOrNull { it.sessionId == currentSession }
-                        ?.toWirePayload(),
+                    mode = deriveMode(pendingForCurrent, TranscriptState.IDLE),
+                    pendingPermission = pendingForCurrent?.toWirePayload(),
                     transcriptState = TranscriptState.IDLE,
                     transcriptText = "",
                     inputText = inputText,
@@ -159,11 +133,38 @@ class ChannelRepository(
             }
                 .distinctUntilChanged()
                 .collect { draft ->
+                    _draft.value = draft
                     val newSeq = seqCounter.incrementAndGet()
                     val payload = draft.toPayload(seq = newSeq)
                     _currentState.value = payload
                     StructuredLog.phoneStateEmit(payload)
                 }
+        }
+
+        // uiState は draft + sessions/messages/attachedImage/connectivity を merge して導出。
+        // mode は draft 由来なので Glass wire と必ず同じ値を観測する。
+        uiState = combine(
+            _draft,
+            sessionStore.snapshot,
+            _pendingPermissions,
+            _attachedImage,
+            connectivity,
+        ) { draft, sessionSnap, pending, image, conn ->
+            PhoneUiState(
+                sessions = sessionSnap.sessions,
+                currentSessionId = sessionSnap.currentSessionId,
+                messages = sessionSnap.messages,
+                pendingPermissions = pending,
+                inputText = draft.inputText,
+                attachedImage = image,
+                mode = draft.mode,
+                transcriptText = draft.transcriptText,
+                connectivity = conn,
+            )
+        }.distinctUntilChanged().let { flow ->
+            val state = MutableStateFlow(PhoneUiState())
+            flow.onEach { state.value = it }.launchIn(scope)
+            state.asStateFlow()
         }
     }
 
@@ -223,8 +224,11 @@ class ChannelRepository(
         clearInput()
         val client = connection.client.value
         if (client == null) {
-            _errors.tryEmit(
-                TransientError.Shared(SharedWireError.Connection.NotConfigured),
+            handleSendFailure(
+                pending = pending,
+                text = text,
+                image = image,
+                err = SharedWireError.Connection.NotConfigured.asException(),
             )
             return
         }
@@ -241,11 +245,28 @@ class ChannelRepository(
                     "chat_id" to resp.chatId,
                     "session_id" to (resp.sessionId ?: ""),
                 )
-                // Pending メッセージに chat_id / session_id を付け直す処理は 4b で
-                // (今は最小機能として ack なし)
+                // FR-PH-55: pending (UNKNOWN bucket / chatId=null) に chat_id + session_id を貼る。
+                // これで後続 SseEvent.Reply の SessionStore.mergeUnknownSession が正規 session へ移送できる。
+                sessionStore.assignChatIdToPending(pending.id, resp.chatId, resp.sessionId)
                 _events.tryEmit(ChannelEvent.Sent(resp.chatId, pending.id))
             }
-            .onFailure { err -> emitErrorFromThrowable(err) }
+            .onFailure { err -> handleSendFailure(pending, text, image, err) }
+    }
+
+    /**
+     * 送信失敗時のロールバック (P2-5): local echo を取り消し input を復元する。
+     * Compose 側で "失敗したまま OUTGOING が残る" のを防ぎ、再送可能にする。
+     */
+    private suspend fun handleSendFailure(
+        pending: ChatMessage,
+        text: String,
+        image: ImageAttachment?,
+        err: Throwable,
+    ) {
+        sessionStore.removePendingMessage(pending.id)
+        _inputText.value = text
+        if (image != null) _attachedImage.value = image
+        emitErrorFromThrowable(err)
     }
 
     suspend fun respondPermission(requestId: String, behavior: PermissionDecision) {
@@ -257,7 +278,7 @@ class ChannelRepository(
         client.sendPermissionVerdict(requestId, behavior)
             .onSuccess {
                 _pendingPermissions.update { current ->
-                    current.filterNot { it.requestId == requestId }.toList()
+                    current.filterNot { it.requestId == requestId }
                 }
             }
             .onFailure { err -> emitErrorFromThrowable(err) }
@@ -271,29 +292,34 @@ class ChannelRepository(
         sessionStore.applySseEvent(event)
         when (event) {
             is SseEvent.PermissionSnapshot -> {
-                val authority = event.requestIds.toSet()
+                // authority order (= Hub 側 createdAtMs 昇順) で local list を再構築。
+                // P2-3: 単に filter すると挿入順しか保たない → reorder する。
                 _pendingPermissions.update { current ->
-                    current.filter { it.requestId in authority }.toList()
+                    val byId = current.associateBy { it.requestId }
+                    event.requestIds.mapNotNull { byId[it] }
                 }
             }
             is SseEvent.Permission -> {
                 _pendingPermissions.update { current ->
                     if (current.any { it.requestId == event.requestId }) current
-                    else (current + PendingPermission(
+                    else current + PendingPermission(
                         requestId = event.requestId,
                         sessionId = event.sessionId,
                         toolName = event.toolName,
                         description = event.description,
                         inputPreview = event.inputPreview,
+                        // Phone-local 時計。wire に createdAtMs が無いため (P3-6 / 設計書 §4.3.1)
+                        // 受信時刻を採用。Hub 側の本物 createdAtMs は permission_snapshot の
+                        // request_ids 順序が持つ (§3.2.1.3 注釈)。
                         createdAtMs = System.currentTimeMillis(),
-                    )).toList()
+                    )
                 }
                 _events.tryEmit(ChannelEvent.PermissionRequested(event.requestId))
             }
             is SseEvent.PermissionAbort -> {
                 _pendingPermissions.update { current ->
                     val filtered = current.filterNot { it.requestId == event.requestId }
-                    if (filtered.size == current.size) current else filtered.toList()
+                    if (filtered.size == current.size) current else filtered
                 }
                 _errors.tryEmit(
                     TransientError.Shared(SharedWireError.Permission.Aborted(event.requestId)),
@@ -319,17 +345,22 @@ class ChannelRepository(
     }
 
     private fun deriveMode(
-        currentSessionId: String?,
-        pending: List<PendingPermission>,
+        pendingForCurrent: PendingPermission?,
         transcriptState: TranscriptState,
-    ): ConversationMode {
-        val hasPendingForCurrent = pending.any { it.sessionId == currentSessionId }
-        return when {
-            hasPendingForCurrent -> ConversationMode.PERMISSION_CONFIRMING
-            transcriptState == TranscriptState.LISTENING -> ConversationMode.LISTENING
-            else -> ConversationMode.IDLE
-        }
+    ): ConversationMode = when {
+        pendingForCurrent != null -> ConversationMode.PERMISSION_CONFIRMING
+        transcriptState == TranscriptState.LISTENING -> ConversationMode.LISTENING
+        else -> ConversationMode.IDLE
     }
+
+    private fun initialDraft(): CurrentStateDraft = CurrentStateDraft(
+        mode = ConversationMode.IDLE,
+        pendingPermission = null,
+        transcriptState = TranscriptState.IDLE,
+        transcriptText = "",
+        inputText = "",
+        micSource = MicSource.GLASS,
+    )
 
     private fun initialCurrentState(): CurrentState = CurrentState(
         seq = 0,
@@ -344,7 +375,7 @@ class ChannelRepository(
 
     private data class CurrentStateDraft(
         val mode: ConversationMode,
-        val pendingPermission: com.example.claudemobilehud.protocol.PendingPermissionPayload?,
+        val pendingPermission: PendingPermissionPayload?,
         val transcriptState: TranscriptState,
         val transcriptText: String,
         val inputText: String,
@@ -368,13 +399,4 @@ sealed class ChannelEvent {
     data class Reply(val chatId: String, val sessionId: String?) : ChannelEvent()
     data class PermissionRequested(val requestId: String) : ChannelEvent()
     data class Sent(val chatId: String, val localMessageId: Long) : ChannelEvent()
-}
-
-/** MutableStateFlow の atomic update helper (kotlinx.coroutines にあるが import 簡素化)。 */
-private inline fun <T> MutableStateFlow<T>.update(transform: (T) -> T) {
-    while (true) {
-        val current = value
-        val updated = transform(current)
-        if (compareAndSet(current, updated)) return
-    }
 }

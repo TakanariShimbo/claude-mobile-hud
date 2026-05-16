@@ -9,10 +9,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.CoroutineContext
@@ -35,8 +37,10 @@ import kotlin.random.Random
  *                ↓          ↓
  *                Failed (再試行) ──→ AuthFailed (手動 reconnect 待ち)
  *
- * `update(Settings)` で baseUrl/token が変わったら今のループを止めて再起動。
- * `reconnect()` は AuthFailed リセット + attempt=0 + ループ再起動。
+ * `update(Settings)` で **HubAddress (baseUrl+token)** が変わったら今のループを止めて
+ * 再起動 (P2-6: openAiApiKey 等の他フィールドでは再起動しない)。
+ * `reconnect()` は AuthFailed リセット + attempt=0 + ループ再起動 + **Failed backoff 中の
+ * delay も即起床** (P1-6)。
  */
 class ConnectionController(
     parentContext: CoroutineContext = SupervisorJob() + kotlinx.coroutines.Dispatchers.Default,
@@ -44,7 +48,7 @@ class ConnectionController(
         ChannelClient(url, token)
     },
 ) {
-    private val log = StructuredLog("mhud.conn")
+    private val log = StructuredLog("channel.conn")
     private val scope = CoroutineScope(parentContext)
     private val mutex = Mutex()
 
@@ -60,27 +64,34 @@ class ConnectionController(
     private val _client = MutableStateFlow<ChannelClient?>(null)
     val client: StateFlow<ChannelClient?> = _client.asStateFlow()
 
+    /** AuthFailed 復帰 / Failed backoff 中断 のどちらにも使う共通 trigger。 */
     private val reconnectTrigger = Channel<Unit>(Channel.CONFLATED)
 
     private var loopJob: Job? = null
-    private var lastSettings: Settings = Settings()
+    private var lastAddress: HubAddress? = null
 
-    /** Settings 変更時に呼ぶ。NotConfigured → Idle、それ以外は loop を再起動。 */
+    /**
+     * Settings 変更時に呼ぶ。HubAddress (baseUrl + token) が変わったときだけ loop 再起動。
+     * 旧 loop の完了を `cancelAndJoin` で待ってから新 loop を起動 (P1-5)。
+     */
     suspend fun update(settings: Settings) = mutex.withLock {
-        if (settings == lastSettings) return@withLock
-        lastSettings = settings
-        loopJob?.cancel()
-        if (!settings.isConfigured) {
+        val newAddress = if (settings.isConfigured) {
+            HubAddress(settings.baseUrl, settings.token)
+        } else null
+        if (newAddress == lastAddress) return@withLock
+        lastAddress = newAddress
+        loopJob?.cancelAndJoin()
+        if (newAddress == null) {
             _status.value = ConnectivityState.Idle
             _client.value = null
             return@withLock
         }
-        val client = clientFactory(settings.baseUrl, settings.token)
+        val client = clientFactory(newAddress.baseUrl, newAddress.token)
         _client.value = client
         loopJob = scope.launch { runConnectionLoop(client) }
     }
 
-    /** 手動再接続 (AuthFailed をリセット)。Settings 未設定なら no-op。 */
+    /** 手動再接続。AuthFailed の wait も Failed の backoff delay も同時に起床。 */
     fun reconnect() {
         reconnectTrigger.trySend(Unit)
     }
@@ -134,9 +145,22 @@ class ConnectionController(
                 "${lastError ?: "disconnected"} / 再接続待ち #$attempt",
             )
             log.info("backoff", "attempt" to attempt, "delay_ms" to delayMs)
-            delay(delayMs)
+            // P1-6: backoff delay 中の reconnect() で即起床する。
+            // select 経由なので、reconnect が来たら attempt をリセットして即再試行。
+            val woken = select<Boolean> {
+                @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+                onTimeout(delayMs) { false }
+                reconnectTrigger.onReceive { true }
+            }
+            if (woken) {
+                attempt = 0
+                log.info("backoff_interrupted_by_reconnect")
+            }
         }
     }
+
+    /** baseUrl + token のペア。再接続要否の判定単位 (P2-6)。 */
+    private data class HubAddress(val baseUrl: String, val token: String)
 
     companion object {
         /** 1s → 30s capped exp backoff + ±25% jitter (Phase 3 §3.2.4)。 */

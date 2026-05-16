@@ -30,7 +30,7 @@ import java.nio.file.StandardCopyOption
 class HistoryStore(private val filesDir: File) {
 
     private val mutex = Mutex()
-    private val log = StructuredLog("mhud.history")
+    private val log = StructuredLog("channel.history")
 
     private val targetFile = File(filesDir, FILE_NAME)
     private val tmpFile = File(filesDir, "$FILE_NAME.tmp")
@@ -51,6 +51,8 @@ class HistoryStore(private val filesDir: File) {
      */
     suspend fun load(): MutableMap<String, MutableList<ChatMessage>> = mutex.withLock {
         withContext(Dispatchers.IO) {
+            // 親 dir が存在しないテスト/初回起動でも load が落ちないように。
+            filesDir.mkdirs()
             recoverIfTmpOrphaned()
 
             if (!targetFile.exists()) {
@@ -130,11 +132,14 @@ class HistoryStore(private val filesDir: File) {
         if (tmpFile.lastModified() > targetFile.lastModified()) {
             val backup = File(filesDir, "$FILE_NAME.bak.${System.currentTimeMillis()}")
             runCatching { targetFile.renameTo(backup) }
+            // P2-8: backup rename が失敗しても target が残っているケースに備えて
+            // REPLACE_EXISTING を付ける (save 側と統一)。
             val ok = runCatching {
                 Files.move(
                     tmpFile.toPath(),
                     targetFile.toPath(),
                     StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
                 )
             }.isSuccess
             log.info("history_tmp_newer_promoted", "ok" to ok)

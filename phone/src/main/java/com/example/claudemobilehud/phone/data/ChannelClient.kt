@@ -6,18 +6,22 @@ import com.example.claudemobilehud.phone.data.model.SseEvent
 import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.protocol.PermissionDecision
 import com.example.claudemobilehud.protocol.error.SharedWireError
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.Call
 import okhttp3.Callback
-import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -28,9 +32,6 @@ import okhttp3.sse.EventSourceListener
 import okhttp3.sse.EventSources
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
-import kotlin.coroutines.suspendCoroutine
 
 /**
  * Phone → Hub HTTP client。Phase 3 §3.2.2 / Phase 2 §4.3.1。
@@ -45,12 +46,12 @@ import kotlin.coroutines.suspendCoroutine
  * - 4xx body の `error_code` が `image_too_large` → `PhoneWireError.Send.ImageTooLarge`
  * - 4xx body の `error_code` が `session_not_active` → `PhoneWireError.Send.SessionNotActive`
  */
-class ChannelClient(
+open class ChannelClient(
     private val baseUrl: String,
     private val token: String,
     private val httpClient: OkHttpClient = defaultClient(),
 ) {
-    private val log = StructuredLog("mhud.client")
+    private val log = StructuredLog("channel.client")
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     private val json = Json {
         ignoreUnknownKeys = true
@@ -62,7 +63,7 @@ class ChannelClient(
         sessionId: String?,
         image: ImageAttachment?,
         imageBase64: String?,
-    ): Result<SendResponse> = runCatching {
+    ): Result<SendResponse> = coroutineRunCatching {
         val payload = SendRequest(
             text = text,
             sessionId = sessionId,
@@ -80,7 +81,7 @@ class ChannelClient(
     suspend fun sendPermissionVerdict(
         requestId: String,
         decision: PermissionDecision,
-    ): Result<Unit> = runCatching {
+    ): Result<Unit> = coroutineRunCatching {
         val payload = PermissionRequest(
             requestId = requestId,
             behavior = if (decision == PermissionDecision.ALLOW) "allow" else "deny",
@@ -92,7 +93,12 @@ class ChannelClient(
         execute(request)
     }
 
-    fun events(): Flow<SseEvent> = callbackFlow {
+    /**
+     * `callbackFlow` の既定 buffer は RENDEZVOUS で trySend が collector 待ちの間に
+     * イベントを silent drop しうる。AD-13 の snapshot 連続 push (permission_snapshot
+     * 直後の outstanding 群を順次再 push) を取りこぼさないため、UNLIMITED buffer を挟む。
+     */
+    open fun events(): Flow<SseEvent> = callbackFlow {
         val request = newRequest("events").get().build()
         val listener = object : EventSourceListener() {
             override fun onOpen(eventSource: EventSource, response: Response) {
@@ -131,7 +137,9 @@ class ChannelClient(
         }
         val source = EventSources.createFactory(httpClient).newEventSource(request, listener)
         awaitClose { source.cancel() }
-    }.flowOn(Dispatchers.IO)
+    }
+        .buffer(capacity = Channel.UNLIMITED, onBufferOverflow = BufferOverflow.SUSPEND)
+        .flowOn(Dispatchers.IO)
 
     private fun parseSseFrame(type: String?, data: String): SseEvent? {
         return try {
@@ -303,13 +311,29 @@ fun SharedWireError.asException(): Throwable = WireErrorException(this)
 fun PhoneWireError.asException(): Throwable = WireErrorException(this)
 
 // --- OkHttp Call.await: callback → suspend ---
-
-private suspend fun Call.await(): Response = suspendCoroutine { cont ->
+// `suspendCancellableCoroutine` で coroutine cancel を `Call.cancel()` に伝播。
+// 結果として scope cancel 時に socket がリークしない。
+private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
     enqueue(object : Callback {
-        override fun onResponse(call: Call, response: Response) = cont.resume(response)
-        override fun onFailure(call: Call, e: IOException) = cont.resumeWithException(e)
+        override fun onResponse(call: Call, response: Response) {
+            if (cont.isActive) cont.resumeWith(Result.success(response)) else response.close()
+        }
+        override fun onFailure(call: Call, e: IOException) {
+            if (cont.isActive) cont.resumeWith(Result.failure(e))
+        }
     })
+    cont.invokeOnCancellation { runCatching { this@await.cancel() } }
 }
 
-@Suppress("UNUSED_PARAMETER")
-private fun ignored(h: Headers) = Unit
+/**
+ * `kotlin.runCatching` は `CancellationException` も catch する罠があるので、
+ * suspending block の中で使う場合は専用版を介して cancellation を rethrow する。
+ * Kotlin/kotlinx.coroutines#1814 で長らく議論されている既知の pitfall。
+ */
+private inline fun <T> coroutineRunCatching(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (c: CancellationException) {
+    throw c
+} catch (t: Throwable) {
+    Result.failure(t)
+}

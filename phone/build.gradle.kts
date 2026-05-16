@@ -87,6 +87,7 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
+    testImplementation(libs.okhttp.mockwebserver)
     testRuntimeOnly(libs.junit.platform.launcher)
 
     androidTestImplementation(platform(libs.androidx.compose.bom))
