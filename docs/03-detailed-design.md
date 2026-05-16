@@ -537,6 +537,47 @@ private data class CurrentStateDraft(
 - 初期値は `initialCurrentStatePayload()` (seq=0, mode=IDLE) で、最初の実 emit は seq=1
 - combine の再評価 / coroutine restart が起きても、`seqCounter` は instance 変数で保持
 
+##### 3.2.1.2.1 ConversationMode 優先順位 (POC 流、Phase 4 で明文化)
+
+`buildDraft` 内の `deriveMode` は以下の優先順位で **1 つだけ** 選ぶ (POC `MainViewModel.deriveMode` と同一):
+
+```kotlin
+private fun deriveMode(
+    pendingForCurrent: PendingPermission?,
+    transcriptState: TranscriptState,
+    confirmingForCurrent: Boolean,
+): ConversationMode = when {
+    transcriptState == TranscriptState.LISTENING -> ConversationMode.LISTENING
+    pendingForCurrent != null                    -> ConversationMode.PERMISSION_CONFIRMING
+    confirmingForCurrent                         -> ConversationMode.CONFIRMING
+    else                                         -> ConversationMode.IDLE
+}
+```
+
+| 優先度 | mode | 条件 | 理由 |
+|---|---|---|---|
+| 1 | `LISTENING` | transcript_state == LISTENING | 録音中はユーザの発話を最優先。Hub から permission が来ても録音 UI を上書きしない (ユーザは「いま喋ってる」最中) |
+| 2 | `PERMISSION_CONFIRMING` | 現 session に pending permission あり | LISTENING 終了後は permission 応答を急ぐ (Hub 側 timeout 持ちのため) |
+| 3 | `CONFIRMING` | `_confirmingBySession[current] == true` | Glass の TAP で録音停止した直後の「送信 or 取消」選択画面 |
+| 4 | `IDLE` | 上記いずれでもない | 通常入力可能状態 |
+
+**§7.2 AC-09 verifier の判定順序もこの優先度に一致**させる (Rev 1 では PERMISSION > LISTENING の順で書いていたが、POC 実装に揃えて修正済み)。
+
+##### 3.2.1.2.2 `setConfirming` と CONFIRMING mode の駆動 (Phase 4 で明文化)
+
+CONFIRMING mode は Glass gesture から driver される (Phone UI からは触らない):
+
+| トリガ | 呼び出し | 結果 |
+|---|---|---|
+| Glass TAP で Listening 停止 | `setConfirming(currentSession, true)` | CONFIRMING mode 出現 |
+| Glass SWIPE_FORWARD (送信) | `setConfirming(currentSession, false)` | CONFIRMING 解除 → send() |
+| Glass SWIPE_BACK (取消) | `setConfirming(currentSession, false)` | CONFIRMING 解除 + input clear |
+| `send()` 成功 | `setConfirming(resp.sessionId ?: sessionId, false)` | CONFIRMING 解除 (Hub mint された正規 id 優先) |
+| `send()` 失敗 | flag 維持 | 入力欄が `handleSendFailure` で復元され、Glass UI も CONFIRMING のまま (再送可) |
+| `ListeningCancel` (Glass cancel) | `setConfirming(currentSession, false)` | CONFIRMING 解除 + clearInput |
+
+`_confirmingBySession: Map<String, Boolean>` は session 単位なので、別 session に切替えて戻ってきても残る (POC と同じセマンティクス)。
+
 ##### 3.2.1.3 SSE イベント処理 (Hub 由来) + `permission_snapshot` 適用
 
 ```kotlin
@@ -557,13 +598,20 @@ private suspend fun onSseEvent(event: SseEvent) {
             }
         }
         is SseEvent.Reply -> {
-            // ...
+            // FR-PH-34: 通知到達 = ユーザ注意が当該 session に向くべきタイミング。
+            // ただし IDLE のときだけ auto-switch する gating を入れる (録音/送信確認/
+            // 権限確認中はユーザ作業を邪魔しない)。詳細は §3.2.1.3.1。
+            event.sessionId?.let { maybeAutoSwitchSession(it) }
+            _events.tryEmit(ChannelEvent.Reply(event.chatId, event.sessionId, event.text))
         }
         is SseEvent.Permission -> {
             _pendingPermissions.update { current ->
                 if (current.any { it.requestId == event.requestId }) current
                 else (current + event.toPending()).toList()  // 新規参照
             }
+            // FR-PH-45: permission も Reply と同じ gating で session 移動。
+            event.sessionId?.let { maybeAutoSwitchSession(it) }
+            _events.tryEmit(ChannelEvent.PermissionRequested(...))
         }
         is SseEvent.PermissionAbort -> {
             _pendingPermissions.update { current ->
@@ -575,6 +623,25 @@ private suspend fun onSseEvent(event: SseEvent) {
     }
 }
 ```
+
+##### 3.2.1.3.1 自動セッション切替 `maybeAutoSwitchSession` (POC port)
+
+Reply / Permission の受信 session が現 session と異なる場合、IDLE のときに限って自動切替する:
+
+```kotlin
+private suspend fun maybeAutoSwitchSession(targetSessionId: String) {
+    val current = sessionStore.snapshot.value.currentSessionId
+    if (current == targetSessionId) return
+    if (_draft.value.mode != ConversationMode.IDLE) return
+    selectSession(targetSessionId)
+}
+```
+
+**ガード条件**:
+- `target == current` → noop (同一 session)
+- `mode != IDLE` → noop (LISTENING / CONFIRMING / PERMISSION_CONFIRMING 中はユーザ作業を尊重)
+
+**race の整理**: `_pendingPermissions.update` 直後に `_draft.value.mode` を読むが、これは combine 経由で非同期更新される。ただし `target != current` の場合、新規 pending は `pendingForCurrent` には絞り込まれない (current session の filter で落ちる) ため、permission 追加が current の mode を `PERMISSION_CONFIRMING` に押し上げることはない。Reply 経路は mode に影響しないので同様。よって `_draft.value.mode` の遅延は判定を誤らせない。
 
 ##### 3.2.1.4 SharedFlow / StateFlow buffer policy (AD-14)
 
@@ -1028,13 +1095,53 @@ class GlassEventDispatcher(
         is ListeningCancel -> {
             repository.stopTranscription()
             repository.clearInput()
-            repository.setConfirming(null, false)
         }
         is PermissionVerdictEvent -> repository.respondPermission(event.requestId, event.decision)
+        is Ping -> { /* heartbeat echo は silently drop (P3-7) */ }
         else -> { /* Phone 向けイベントが Glass 経由で来ることはない */ }
     }
 }
 ```
+
+##### 3.4.2.1 `handleGesture` (POC port、Phase 4 で明文化)
+
+```kotlin
+private suspend fun handleGesture(which: GestureKind) {
+    // gesture 受信時点の current session を冒頭で snapshot し、setConfirming に
+    // 明示的に渡す。auto-switch / 通知タップで途中で session が切替わっても
+    // 別 session に flag が立たないようにする (P2-A of review、POC pattern)。
+    val sessionIdAtGesture = repository.uiState.value.currentSessionId
+    when (which) {
+        GestureKind.TAP -> {
+            // Listening 中の停止のみ confirming flag を立てる (Idle → 録音開始は触らない)。
+            // wasListening 判定は toggleTranscription() 前に評価しないと、stop 後の
+            // state を見て false 判定になる race を踏む。
+            val wasListening = repository.input.transcription.state.value.let {
+                it is TranscriptionClient.State.Listening ||
+                    it is TranscriptionClient.State.Connecting
+            }
+            toggleTranscription()
+            if (wasListening) repository.setConfirming(sessionIdAtGesture, true)
+        }
+        GestureKind.SWIPE_FORWARD -> {
+            // 送信確定: confirming を畳んでから send()。inputText snapshot を
+            // 同期的に取ることで、launch 内で前回 send の clearInput() 結果を
+            // 読んでしまう race も防ぐ (P1-4)。
+            repository.setConfirming(sessionIdAtGesture, false)
+            val snapshot = repository.inputText.value
+            repository.send(snapshot)
+        }
+        GestureKind.SWIPE_BACK -> {
+            // 取消: confirming を畳んで input をクリア。
+            repository.setConfirming(sessionIdAtGesture, false)
+            repository.clearInput()
+        }
+        GestureKind.DOUBLE_TAP -> { /* Glass 側で session 選択画面に戻す。Phone 無処理。*/ }
+    }
+}
+```
+
+詳細な CONFIRMING mode の駆動表は §3.2.1.2.2 を参照。
 
 ### 3.5 UI 層
 
@@ -1745,9 +1852,13 @@ def parse_kv_line(line):
 
 INVARIANTS = [
     # (target_mode, predicate)
-    ('PERMISSION_CONFIRMING', lambda e: e['pending_request_id'] != 'null'),
+    # §3.2.1.2.1 の優先順位 (LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE) に
+    # 揃える。録音中は permission 出現でも mode を奪わない設計なので、LISTENING を先頭。
+    # CONFIRMING は `_confirmingBySession[current]==true` で出るので transcript ではなく
+    # 構造化ログに新 key (confirming=true/false) を持たせて参照する想定 (Phase 5 実装時)。
     ('LISTENING', lambda e: e['transcript_state'] == 'LISTENING'),
-    ('CONFIRMING', lambda e: e['transcript_state'] != 'IDLE' or int(e['input_len']) > 0),
+    ('PERMISSION_CONFIRMING', lambda e: e['pending_request_id'] != 'null'),
+    ('CONFIRMING', lambda e: e.get('confirming') == 'true'),
     ('IDLE', lambda e: True),
 ]
 
