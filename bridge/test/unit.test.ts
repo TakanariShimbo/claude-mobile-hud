@@ -47,6 +47,32 @@ describe("ImageStaging", () => {
         // ディレクトリは消えているので readdir は失敗するはず
         await expect(readdir(dir)).rejects.toThrow();
     });
+
+    it("prepare gc-cleans orphan pid inboxes (P2-7)", async () => {
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        const root = await mkdtemp(join(tmpdir(), "bridge-inbox-root-"));
+        // 3 つの pid ディレクトリを用意: 自分 / 生きている他 / 死んでいる
+        const selfPid = 99999;
+        const aliveOther = 88888;
+        const deadOther = 77777;
+        const notNumeric = "abc";
+        await mkdir(join(root, String(selfPid)), { recursive: true });
+        await mkdir(join(root, String(aliveOther)), { recursive: true });
+        await mkdir(join(root, String(deadOther)), { recursive: true });
+        await mkdir(join(root, notNumeric), { recursive: true });
+        await writeFile(join(root, String(deadOther), "stuff.jpg"), "x");
+        await writeFile(join(root, notNumeric, "stuff"), "y");
+
+        const stage = new ImageStaging(join(root, String(selfPid)), silentLogger, {
+            isPidAlive: (pid) => pid === aliveOther,
+        });
+        await stage.prepare();
+
+        const remaining = await readdir(root);
+        expect(remaining.sort()).toEqual(
+            [String(selfPid), String(aliveOther), notNumeric].sort(),
+        );
+    });
 });
 
 describe("SessionDetector", () => {

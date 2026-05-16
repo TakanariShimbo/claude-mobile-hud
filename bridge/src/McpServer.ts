@@ -34,10 +34,16 @@ const SERVER_VERSION: string = ((): string => {
     }
 })();
 
-const INSTRUCTIONS =
-    'Messages from a mobile client arrive as `notifications/claude/channel` with ' +
-    '`meta.chat_id` and optional `meta.image_path`. Reply with the "reply" tool, ' +
-    'passing the chat_id from the meta verbatim. Treat each chat_id as one conversation thread.';
+const INSTRUCTIONS = [
+    "Messages from a mobile client arrive as `notifications/claude/channel`",
+    "with `meta.chat_id` (always present) and `meta.image_path` (when the user attached an image — read it with the Read tool if you need to inspect it).",
+    "",
+    "RULES:",
+    "- To respond, ALWAYS use the `reply` tool. Pass `chat_id` verbatim from the inbound meta; do NOT invent or modify it.",
+    "- Treat each `chat_id` as one independent conversation thread.",
+    "- Do NOT emit `notifications/claude/channel*` yourself — those are server→client only. The `reply` tool is the sole client→server outbound path.",
+    "- If a permission notification (`notifications/claude/channel/permission`) arrives, it carries the user verdict for a tool call you previously initiated; proceed accordingly.",
+].join("\n");
 
 const REPLY_TOOL = {
     name: "reply",
@@ -100,6 +106,11 @@ export class McpServer {
      * `deliverPermissionVerdict` (= notifications/claude/channel/permission) はこの queue を
      * 通さない: permission は channel とは独立した notification 経路で、互いの順序を縛る
      * 必要が無いため。
+     *
+     * **メモリ安全性**: `deliverSend` 毎に `this.writeQueue = this.writeQueue.then(...)` で
+     * 置換するが、解決済み Promise の `then` callback は microtask 完了後に GC 対象になる。
+     * Promise chain が「N 回呼ばれたら深さ N の参照グラフが残る」わけではない (V8 は
+     * 解決済み prior Promise の参照を保持しない) ので、長時間動かしてもメモリは伸びない。
      */
     private writeQueue: Promise<void> = Promise.resolve();
 
