@@ -47,7 +47,14 @@
             android:exported="true"
             android:label="@string/app_name"
             android:launchMode="singleTask"
-            android:theme="@style/Theme.Phone">
+            android:theme="@style/Theme.Phone"
+            android:windowSoftInputMode="adjustNothing|stateHidden">
+            <!--
+              `adjustNothing`: edge-to-edge + Android 15+ の `adjustResize` 強制を opt out。
+              これが無いと system が window を縮める + Compose `imePadding()` が padding を
+              足す = 二重補正で入力欄下に余分な隙間が出る (POC でも同じ症状を解消)。
+              `stateHidden`: 起動直後にキーボードを開かない。
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

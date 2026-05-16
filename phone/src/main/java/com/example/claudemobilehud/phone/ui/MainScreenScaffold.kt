@@ -136,6 +136,11 @@ fun MainScreenScaffold(
             snackbarHost = { SnackbarHost(dialogState.snackbar) },
             modifier = Modifier.fillMaxSize(),
         ) { padding ->
+            // IME 追従は `.imePadding()` が担当する。Activity 側で
+            // `windowSoftInputMode="adjustNothing"` (AndroidManifest.xml) を設定して
+            // system の window resize を黙らせているので、Android 15+ の `adjustResize`
+            // 強制と `.imePadding()` の二重補正は発生しない (= 入力欄下に隙間が出ない)。
+            // この 2 つはペアで動く設計なので、片方だけ外すと regression する。
             Column(
                 modifier = Modifier
                     .fillMaxSize()
