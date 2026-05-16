@@ -1636,9 +1636,44 @@ class HubClient {
 }
 ```
 
-#### 6.2.3 `SessionDetector`
+#### 6.2.3 `SessionDetector` (Phase 4 改訂: env injection 方式)
 
-POC と同じく `/proc/<ppid>/cmdline` から `--session-id` を抜く。
+Bridge 起動時に `process.env.BRIDGE_SESSION_ID` を読み、UUID 正規表現で validate した上で session_id として確定する。**`/proc` 探索 / 親プロセス walk / cmdline parse は しない** (POC `claude-channel` の process-walk 方式から方針転換、後述)。
+
+env が未設定 / 空 / 不正 UUID の場合は **即 throw** (random UUID fallback は AD-12 相関 ID 伝播を静かに壊すため絶対禁止)。
+
+##### session_id の single source of truth = wrapper (`claude-mobile-hud run`)
+
+session_id は wrapper が `uuidgen` で 1 つ生成し、**同じ UUID を 2 方向に push** する:
+
+| 経路 | 用途 |
+|---|---|
+| claude の起動引数 `--session-id <uuid>` | `~/.claude/projects/<slug>/<uuid>.jsonl` の履歴 slug を確定 |
+| `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID` | Bridge → Hub `register` の session_id と一致させる |
+
+この双方向 inject により Bridge / claude / Hub の session_id が **構築時に既に一致** している。Bridge が起動後に逆引きで session_id を割り出す必要が無い (= AD-12 を実装単純化で支える)。
+
+`.mcp.runtime.json` は wrapper が毎回 `node -e JSON.stringify(...)` で動的生成する (heredoc 直書きは tsx 等の絶対パスに `"` / `\` が混じった瞬間 JSON が壊れるので避ける):
+
+```json
+{"mcpServers":{"channel":{"type":"stdio","command":"<tsx>","args":["<bridge entry>"],"env":{"BRIDGE_SESSION_ID":"<uuid>"}}}}
+```
+
+wrapper はその後 `exec claude --mcp-config <生成 path> --session-id <uuid> --dangerously-load-development-channels server:channel [yolo なら --dangerously-skip-permissions] "$@"` で claude を引き継ぐ。`--dangerously-load-development-channels server:channel` は Bridge が emit する `notifications/claude/channel*` を claude に届ける gate flag (Claude Code 2.x で `--help` から hidden になったが flag 自体は受理される)。
+
+##### POC からの設計変更理由
+
+POC `claude-channel` は静的 `.mcp.json` を `--mcp-config` で渡す制約があり、Bridge 起動時点で session_id が wrapper 側から見えなかったため、**`/proc/<ppid>/cmdline` を最大 10 hop 親方向に登って claude 祖先を探し、その cmdline から `--session-id` を抜く** 方式を採っていた。本プロジェクトは wrapper が runtime config を毎回生成するので env templating ができ、process-walk の問題:
+
+- Linux 限定 (`/proc` 依存)
+- Claude Code 2.x が MCP child を node ラッパー経由で spawn → ppid 1 hop では届かない
+- spawn topology のバージョン差で壊れる fragility
+
+を回避できる。Bridge 側のコードも 134 行 → 50 行に縮小。
+
+##### scope 外
+
+- 並列 `run` (同一 checkout で複数 claude セッション同時起動) は未サポート (`.mcp.runtime.json` が race で上書きされる)。Phase 4 は 1 user 1 session 想定。並列が必要になったら wrapper を `mktemp` ベースに切り替える。
 
 #### 6.2.4 `ImageStaging`
 
