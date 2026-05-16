@@ -10,12 +10,18 @@
   "scripts": {
     "build": "tsc -p .",
     "start": "tsx src/index.ts",
+    "pair": "tsx src/pair.ts",
+    "pair:lan": "tsx src/pair.ts lan",
+    "pair:ts": "tsx src/pair.ts ts",
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "dependencies": {},
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"

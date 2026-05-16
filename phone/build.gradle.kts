@@ -87,6 +87,10 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.sse)
 
+    // 4-6: QR pairing 用 (Hub の pair CLI が吐く QR を読み取る)。Google Play Services
+    // 経由の ML Kit Code Scanner を使う (`com.google.mlkit.vision.codescanner.*`)。
+    implementation(libs.play.services.code.scanner)
+
     // Unit tests (JUnit Jupiter on JVM)
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.kotlinx.coroutines.test)

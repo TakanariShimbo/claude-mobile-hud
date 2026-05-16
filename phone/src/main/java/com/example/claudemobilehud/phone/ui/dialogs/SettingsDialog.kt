@@ -3,8 +3,12 @@ package com.example.claudemobilehud.phone.ui.dialogs
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -13,17 +17,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.example.claudemobilehud.phone.data.Pairing
+import com.example.claudemobilehud.phone.data.QrScanCancelled
+import com.example.claudemobilehud.phone.data.QrScanner
 import com.example.claudemobilehud.phone.data.model.Settings
+import kotlinx.coroutines.launch
 
 /**
  * Hub 接続設定 + OpenAI API key の編集 dialog。
  *
- * **QR スキャン未実装**: POC は QrScanner + Pairing.parse を持っていたが本リライト
- * のスコープでは手動入力のみ。Phase 4 後段 (もしくは Phase 5 polish) で別ストーリー
- * として実装予定。
+ * **4-6 で QR pairing を再実装** (POC からの port):
+ *   - 「QR スキャン」ボタンで [QrScanner.scan] を呼び ML Kit Code Scanner を起動。
+ *   - 結果を [Pairing.parse] に流して baseUrl / token をフィールドにセット。
+ *   - openAiApiKey は QR には乗らない (端末固有 secret なので手入力のまま保持)。
+ *   - スキャン失敗 / payload 解釈失敗は dialog 内 inline text で出す (snackbar は dialog 外
+ *     なので AlertDialog の中で見せにくい)。
  */
 @Composable
 fun SettingsDialog(
@@ -34,6 +48,10 @@ fun SettingsDialog(
     var url by remember { mutableStateOf(initial.baseUrl) }
     var token by remember { mutableStateOf(initial.token) }
     var openAiKey by remember { mutableStateOf(initial.openAiApiKey) }
+    // P3-E of 5-6 review: scanError は config change (回転等) で消えないよう rememberSaveable に。
+    var scanError by rememberSaveable { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -46,6 +64,40 @@ fun SettingsDialog(
                     color = MaterialTheme.colorScheme.outline,
                 )
                 Spacer(Modifier.height(12.dp))
+                TextButton(onClick = {
+                    scanError = null
+                    scope.launch {
+                        runCatching { QrScanner.scan(context) }
+                            .onSuccess { raw ->
+                                Pairing.parse(raw)
+                                    .onSuccess { result ->
+                                        url = result.baseUrl
+                                        token = result.token
+                                    }
+                                    .onFailure { e ->
+                                        scanError = "QR 解釈失敗: ${e.message ?: e}"
+                                    }
+                            }
+                            .onFailure { e ->
+                                // ユーザの能動的キャンセルは「失敗」扱いしない (UX 上の noise)。
+                                if (e !is QrScanCancelled) {
+                                    scanError = "スキャン失敗: ${e.message ?: e}"
+                                }
+                            }
+                    }
+                }) {
+                    Icon(Icons.Default.QrCodeScanner, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("QR スキャン")
+                }
+                scanError?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it },
