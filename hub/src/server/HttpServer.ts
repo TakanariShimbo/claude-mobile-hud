@@ -132,12 +132,19 @@ export class HttpServer {
         }
 
         const chatId = this.deps.chats.mint();
-        const dispatch = this.deps.dispatchToBridge(sessionId, {
+        const sendMsg: import("../wire/BridgeWire.js").SendMessage = {
             type: "send",
             chat_id: chatId,
             text: body.text,
-            // image_path: Phase 4 で ImageStaging を入れた段階で結線
-        });
+        };
+        // image は base64 のまま Bridge へ転送 (Bridge が staging する: Phase 3 §6.2.4)
+        if (typeof body.image_base64 === "string" && body.image_base64.length > 0) {
+            sendMsg.image_base64 = body.image_base64;
+        }
+        if (typeof body.image_mime === "string" && body.image_mime.length > 0) {
+            sendMsg.image_mime = body.image_mime;
+        }
+        const dispatch = this.deps.dispatchToBridge(sessionId, sendMsg);
         if (!dispatch.ok) {
             this.deps.logger.warn("send_dispatch_failed", {
                 session_id: sessionId,

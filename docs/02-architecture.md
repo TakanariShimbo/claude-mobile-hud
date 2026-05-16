@@ -281,7 +281,7 @@ TS 側にも同様の golden ペアを置く。**Kotlin encode→TS decode** と
 | `type` | フィールド | 説明 |
 |---|---|---|
 | `ack_register` | `chat_id_seed`? | 登録成功通知 (chat_id 生成の seed 受け渡しは Phase 3 で要否判断) |
-| `send` | `chat_id`, `text`, `image_path`? | Phone → Claude のメッセージ。Hub が chat_id を mint してから渡す |
+| `send` | `chat_id`, `text`, `image_base64`?, `image_mime`? | Phone → Claude のメッセージ。Hub が chat_id を mint してから渡す。画像は base64 のまま Bridge へ転送し、Bridge 側で staging (§6.2.4 と整合)。Rev 6 で `image_path?` から訂正 |
 | `permission_verdict` | `request_id`, `behavior` | Phone の verdict 結果 |
 
 ##### 接続管理

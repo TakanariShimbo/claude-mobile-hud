@@ -1,5 +1,6 @@
-// Hub ↔ Bridge の TCP NDJSON wire 型。Phase 2 §4.3.2 / Phase 3 §5.1。
-// Bridge は接続後最初に `register` を送る。以後双方向に NDJSON (1 行 1 JSON)。
+// Hub ↔ Bridge の TCP NDJSON wire 型 (Bridge 側の視点)。
+// Hub 側 (hub/src/wire/BridgeWire.ts) と表裏一体。Phase 2 §4.3.2 / Phase 3 §6.1。
+// shape は完全に一致させること (parity)。
 
 // --- Bridge → Hub ---
 
@@ -9,14 +10,14 @@ export type RegisterMessage = {
     pid: number;
 };
 
-export type BridgeReplyMessage = {
+export type ReplyMessage = {
     type: "reply";
     chat_id: string;
     session_id: string;
     text: string;
 };
 
-export type BridgePermissionMessage = {
+export type PermissionMessage = {
     type: "permission";
     request_id: string;
     session_id: string;
@@ -25,7 +26,7 @@ export type BridgePermissionMessage = {
     input_preview: string;
 };
 
-export type BridgePermissionAbortMessage = {
+export type PermissionAbortMessage = {
     type: "permission_abort";
     request_id: string;
     reason?: string;
@@ -33,9 +34,9 @@ export type BridgePermissionAbortMessage = {
 
 export type BridgeToHubMessage =
     | RegisterMessage
-    | BridgeReplyMessage
-    | BridgePermissionMessage
-    | BridgePermissionAbortMessage;
+    | ReplyMessage
+    | PermissionMessage
+    | PermissionAbortMessage;
 
 // --- Hub → Bridge ---
 
@@ -48,9 +49,9 @@ export type SendMessage = {
     type: "send";
     chat_id: string;
     text: string;
-    /** Phone から受け取った画像の base64 (data: prefix なし)。Bridge 側で staging される。 */
+    /** Phone 由来の base64 画像 (data: prefix なし)。Bridge 側で staging して image_path を Claude へ。 */
     image_base64?: string;
-    /** image_base64 と組で渡る MIME (例: "image/jpeg")。 */
+    /** image_base64 の MIME (例: "image/jpeg")。 */
     image_mime?: string;
 };
 
