@@ -13,8 +13,17 @@ import type { Logger } from "./log/StructuredLog.js";
 export interface SessionDetectorOptions {
     /** デフォルト: process.ppid */
     parentPid?: number;
-    /** デフォルト: process.env.CLAUDE_SESSION_ID */
+    /**
+     * 明示的 env 値の上書き。指定された場合は `processEnv` を見ない。テストで env を
+     * 直接固定したいときに使う。
+     */
     envValue?: string | undefined;
+    /**
+     * env 検索対象 (default: `process.env`)。テストで env 全体を差し替えるための seam。
+     * 検索順は `CLAUDE_CODE_SESSION_ID` (Claude Code 2.x 経路) → `CLAUDE_SESSION_ID`
+     * (旧 POC / 互換)。
+     */
+    processEnv?: NodeJS.ProcessEnv;
     /** デフォルト: /proc/<pid>/cmdline を読む */
     readCmdline?: (pid: number) => Promise<string>;
     logger?: Logger;
@@ -27,9 +36,10 @@ export class SessionDetector {
 
     /**
      * 優先順位:
-     *  1. /proc/<ppid>/cmdline の `--session-id <uuid>`
-     *  2. env CLAUDE_SESSION_ID
-     *  3. throw (Bridge が誤って単独起動された徴候)
+     *  1. /proc/<ppid>/cmdline の `--session-id <uuid>` (wrapper script / 明示起動)
+     *  2. env `CLAUDE_CODE_SESSION_ID` (Claude Code 2.x の default 経路)
+     *  3. env `CLAUDE_SESSION_ID` (旧 POC / 古い Claude CLI 互換)
+     *  4. throw (Bridge が誤って単独起動された徴候)
      */
     async detect(): Promise<string> {
         const ppid = this.opts.parentPid ?? process.ppid;
@@ -46,7 +56,13 @@ export class SessionDetector {
             this.opts.logger?.warn("cmdline_read_failed", { error: (err as Error).message });
         }
 
-        const envVal = this.opts.envValue ?? process.env.CLAUDE_SESSION_ID;
+        // Claude Code 2.x 経路: claude が child の env に CLAUDE_CODE_SESSION_ID を入れる。
+        // 旧 CLAUDE_SESSION_ID は POC 互換のため fallback で見る。
+        const env = this.opts.processEnv ?? process.env;
+        const envVal =
+            this.opts.envValue ??
+            env.CLAUDE_CODE_SESSION_ID ??
+            env.CLAUDE_SESSION_ID;
         if (envVal && envVal.length > 0) {
             this.opts.logger?.info("session_detected", { source: "env", session_id: envVal });
             return envVal;
@@ -54,7 +70,8 @@ export class SessionDetector {
 
         this.opts.logger?.error("session_id_unavailable", { ppid });
         throw new Error(
-            `session_id not found: neither --session-id in /proc/${ppid}/cmdline nor CLAUDE_SESSION_ID env. ` +
+            `session_id not found: neither --session-id in /proc/${ppid}/cmdline nor ` +
+                "CLAUDE_CODE_SESSION_ID / CLAUDE_SESSION_ID env. " +
                 "Bridge must be launched as a Claude Code child process.",
         );
     }

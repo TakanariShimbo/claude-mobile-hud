@@ -115,10 +115,35 @@ describe("SessionDetector", () => {
         const det = new SessionDetector({
             parentPid: 1,
             envValue: undefined,
+            // process.env を空に差し替え。テストランナー自体の env (CLAUDE_CODE_SESSION_ID
+            // が claude code 配下なら勝手に入る) から拾わないため。
+            processEnv: {},
             readCmdline: async () => "node\0",
             logger: silentLogger,
         });
         await expect(det.detect()).rejects.toThrow(/session_id not found/);
+    });
+
+    it("detect picks up CLAUDE_CODE_SESSION_ID env (Claude Code 2.x default)", async () => {
+        const det = new SessionDetector({
+            parentPid: 1,
+            envValue: undefined,
+            processEnv: { CLAUDE_CODE_SESSION_ID: "from-claude-code-env" },
+            readCmdline: async () => "node\0",
+            logger: silentLogger,
+        });
+        await expect(det.detect()).resolves.toBe("from-claude-code-env");
+    });
+
+    it("detect falls back to legacy CLAUDE_SESSION_ID env when newer var is absent", async () => {
+        const det = new SessionDetector({
+            parentPid: 1,
+            envValue: undefined,
+            processEnv: { CLAUDE_SESSION_ID: "from-legacy-env" },
+            readCmdline: async () => "node\0",
+            logger: silentLogger,
+        });
+        await expect(det.detect()).resolves.toBe("from-legacy-env");
     });
 
     it("detect handles cmdline read failure gracefully", async () => {
