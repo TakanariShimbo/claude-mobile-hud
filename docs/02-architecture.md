@@ -3,7 +3,7 @@
 `claude-mobile-hud` v1.0 の **外部設計**。コンポーネントの責務 / 境界 / interface (wire protocol) / 主要シーケンス / 横断的設計判断 を定める。各コンポーネントの**内部実装** (クラス / メソッド) は Phase 3 (詳細設計) で扱う。
 
 - **作成日**: 2026-05-16
-- **改訂**: Rev 4 (Rev 3 への再々レビュー反映 + Phase 1 Rev 4 への整合更新)
+- **改訂**: Rev 5 (Phase 3 AD-13 で導入した `permission_snapshot` wire を §4.3.1 / §4.7 に正式登録)
 - **依存**: Phase 1 (`01-requirements.md`)
 - **対象範囲**: Phase 1 §11.2 (Phase 2 設計判断) への結論 + §11.1 (要件穴) の最終値確定
 
@@ -259,6 +259,7 @@ TS 側にも同様の golden ペアを置く。**Kotlin encode→TS decode** と
 | `session_active` | `{ "session_id" }` | session が起動 / アクティブに |
 | `session_inactive` | `{ "session_id" }` | session が終了 |
 | `session_snapshot` | `{ "active_session_ids": [...] }` | SSE 接続成立直後に **必ず 1 回**送る (起動時 reconciliation 用、§6.5) |
+| `permission_snapshot` | `{ "request_ids": [...] }` | SSE 接続成立直後、`session_snapshot` の後に **必ず 1 回**送る (AD-13、createdAtMs 昇順)。Phone は受信した request_id 集合で local `pendingPermissions` を絞り込む |
 
 備考: SSE プロトコルの open/close は wire 上のイベントではなく接続層で扱う。`session_active` / `session_inactive` は冪等 (同 id を複数回受信しても OK)。
 
@@ -398,13 +399,14 @@ TS 側にも同様の golden ペアを置く。**Kotlin encode→TS decode** と
 
 ### 4.7 SSE 接続成立直後の reconciliation (起動時 / 再接続時共通)
 
-新規 / 再接続の SSE オープン後、**Hub は必ず以下を順に push する**:
+新規 / 再接続の SSE オープン後、**Hub は必ず以下を順に push する** (Rev 5 更新):
 
 1. `session_snapshot` (現在 Hub 側でアクティブな session_id 一覧) — FR-HU-05
-2. **outstanding な `permission` イベントを全て再 push** — FR-HU-14 (Rev 4 追加)
+2. **`permission_snapshot { request_ids }`** (現時点で outstanding な request_id を createdAtMs 昇順で含む) — FR-HU-14 + AD-13 (Phase 3)
+3. **outstanding な `permission` イベントを createdAtMs 昇順で全て個別 push** — FR-HU-14
    - verdict 未送出 / abort 未着のもののみ
-   - Phone 側は FR-PH-46 (request_id 冪等) で重複処理せず正しく merge する
-3. (以降) リアルタイムイベント `session_active` / `session_inactive` / `reply` / `permission` / `permission_abort` / etc.
+   - Phone 側は `permission_snapshot` で local pending を絞り込んだ上で、個別 push を冪等 (FR-PH-46) に処理
+4. (以降) リアルタイムイベント `session_active` / `session_inactive` / `reply` / `permission` / `permission_abort` / etc.
 
 Phone 側ルール:
 - `session_snapshot` 受信時に、自分が持っている current_session が snapshot に含まれていなければ FR-PH-54 ルールで補正 (詳細 §6.5)
