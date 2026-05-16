@@ -1,5 +1,6 @@
 // Bridge entry — Claude Code から子プロセスで起動される。
-// 1. SessionDetector で親の cmdline から --session-id を抽出
+// 1. SessionDetector で env `BRIDGE_SESSION_ID` から session_id を取得
+//    (`claude-mobile-hud run` wrapper が `.mcp.runtime.json` の env で inject する)
 // 2. HubClient で Hub に TCP NDJSON 接続 + register
 // 3. McpServer で stdio MCP を立ち上げ Claude と話す
 // 4. SIGTERM/SIGINT / MCP close で graceful shutdown + inbox cleanup

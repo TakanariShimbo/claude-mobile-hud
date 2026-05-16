@@ -21,9 +21,83 @@ case "$CMD" in
         exit 1
         ;;
     run)
-        # Phase 4: Claude Code セッションを起動 (safe / yolo モード)
-        echo "[claude-mobile-hud] run: not yet implemented (Phase 4)" >&2
-        exit 1
+        # Claude Code セッションを起動 (safe / yolo モード)。POC `claude-channel run` の移植。
+        #
+        # - cwd は呼び出し元のものをそのまま継承する (history slug が一致するよう、
+        #   $ROOT に cd しない)。
+        # - `.mcp.runtime.json` を bridge/ 配下に動的生成して `--mcp-config` で渡す。
+        #   user-scope (`~/.claude.json`) の MCP entry には依存しない (POC と同じ独立構成)。
+        # - `--dangerously-load-development-channels server:channel` で Bridge が emit する
+        #   `notifications/claude/channel*` を claude に届ける gate を開ける。POC と同じ機構
+        #   (Claude 2.x でも flag は受理される、`--help` から隠れただけ)。
+        # - `--session-id <uuid>` で claude の履歴 slug を確定する。Bridge には別途
+        #   `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID` で同じ UUID を inject する
+        #   (wrapper が session_id の single source of truth — AD-12)。
+        MODE="${1:-}"
+        shift || true
+        usage_run() {
+            cat >&2 <<USAGE
+Usage: claude-mobile-hud run <safe|yolo> [-- claude args...]
+  safe  Permission Relay 有効 (Phone で verdict)
+  yolo  --dangerously-skip-permissions (Permission Relay 無効)
+USAGE
+            exit 1
+        }
+        case "$MODE" in safe|yolo) ;; *) usage_run ;; esac
+
+        # P2-1 of review: 後段の `nc -z ... 2>/dev/null` は `nc: command not found` を握りつぶす
+        # ので、nc が無い PC で「Hub not running」という誤メッセージが出てしまう。必須コマンドを
+        # 先に明示 verify して actionable なエラーにする。Ubuntu では全て default で入るので
+        # 通常 silent path。
+        for bin in nc uuidgen claude node; do
+            command -v "$bin" >/dev/null 2>&1 || {
+                echo "missing required command: $bin (install it or check PATH)" >&2
+                exit 1
+            }
+        done
+
+        HUB_BRIDGE_PORT="${HUB_BRIDGE_PORT:-8787}"
+        if ! nc -z -w 1 127.0.0.1 "$HUB_BRIDGE_PORT" 2>/dev/null; then
+            echo "Hub not running on 127.0.0.1:$HUB_BRIDGE_PORT. Start it with: claude-mobile-hud hub" >&2
+            exit 1
+        fi
+
+        SESSION_ID=$(uuidgen)
+        echo "[session] $SESSION_ID" >&2
+
+        BRIDGE_DIR="$ROOT/bridge"
+        TSX_BIN="$BRIDGE_DIR/node_modules/.bin/tsx"
+        BRIDGE_ENTRY="$BRIDGE_DIR/src/index.ts"
+        if [[ ! -x "$TSX_BIN" ]]; then
+            echo "tsx not found at $TSX_BIN. Run 'npm install' under bridge/ first." >&2
+            exit 1
+        fi
+        MCP_CONFIG_FILE="$BRIDGE_DIR/.mcp.runtime.json"
+        # 動的生成: server 名 = `channel` (`--dangerously-load-development-channels server:channel`
+        # と一致させる)。`npx -y` 不要 (bridge に tsx 同梱)。
+        # - `"type": "stdio"`: Claude Code 2.x は省略時の type 推測が不安定なので明示。
+        # - `env.BRIDGE_SESSION_ID`: wrapper の UUID を Bridge に直接渡す (AD-12 の single source
+        #   of truth)。Bridge は /proc を歩かず env を読むだけで session_id を得る。claude には
+        #   `--session-id $SESSION_ID` で同じ値を渡すので、claude の履歴 slug と Hub の register
+        #   が完全に一致する。
+        #
+        # P1-1 of review: heredoc に変数を直接埋め込むと $TSX_BIN/$BRIDGE_ENTRY のパスに `"` や
+        # `\` が含まれた瞬間 JSON が壊れる (現状は固定パスで実害無いが防御コード)。`node -e` で
+        # JSON.stringify を経由させ、JSON エスケープを処理系に任せる。
+        node -e 'const fs=require("node:fs");fs.writeFileSync(process.argv[1],JSON.stringify({mcpServers:{channel:{type:"stdio",command:process.argv[2],args:[process.argv[3]],env:{BRIDGE_SESSION_ID:process.argv[4]}}}}))' \
+            "$MCP_CONFIG_FILE" "$TSX_BIN" "$BRIDGE_ENTRY" "$SESSION_ID"
+
+        EXTRA_FLAGS=()
+        if [[ "$MODE" == "yolo" ]]; then
+            EXTRA_FLAGS+=("--dangerously-skip-permissions")
+        fi
+
+        exec claude \
+            --mcp-config "$MCP_CONFIG_FILE" \
+            --session-id "$SESSION_ID" \
+            --dangerously-load-development-channels server:channel \
+            "${EXTRA_FLAGS[@]}" \
+            "$@"
         ;;
     resume)
         # Phase 4: cwd-scoped resume picker

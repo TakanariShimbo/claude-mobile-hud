@@ -32,3 +32,6 @@ __pycache__/
 
 # Generated
 *.tmp
+# `claude-mobile-hud run` が毎回 uuid 入りで生成する MCP config。
+# session_id だけなので機密ではないが、generated file を repo に紛れ込ませない (P1-2)。
+bridge/.mcp.runtime.json

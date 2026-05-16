@@ -3,10 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ImageStaging, isSupportedMime } from "../src/ImageStaging.js";
-import {
-    parseSessionIdFromCmdline,
-    SessionDetector,
-} from "../src/SessionDetector.js";
+import { SessionDetector } from "../src/SessionDetector.js";
 import { StructuredLog } from "../src/log/StructuredLog.js";
 
 const silentLogger = new StructuredLog("test", "ERROR", () => undefined);
@@ -76,83 +73,43 @@ describe("ImageStaging", () => {
 });
 
 describe("SessionDetector", () => {
-    it("parseSessionIdFromCmdline picks --session-id <uuid>", () => {
-        const cmdline = "node\0/path/claude\0--session-id\0abc-123\0--verbose\0\0";
-        expect(parseSessionIdFromCmdline(cmdline)).toBe("abc-123");
-    });
+    const UUID = "11111111-2222-3333-4444-555555555555";
 
-    it("parseSessionIdFromCmdline handles --session-id=<uuid>", () => {
-        const cmdline = "node\0/path/claude\0--session-id=zzz\0";
-        expect(parseSessionIdFromCmdline(cmdline)).toBe("zzz");
-    });
-
-    it("parseSessionIdFromCmdline returns null when absent", () => {
-        const cmdline = "node\0/path/claude\0--something\0else\0";
-        expect(parseSessionIdFromCmdline(cmdline)).toBeNull();
-    });
-
-    it("detect prefers cmdline over env over random", async () => {
+    it("returns BRIDGE_SESSION_ID when set and valid", async () => {
         const det = new SessionDetector({
-            parentPid: 1,
-            envValue: "from-env",
-            readCmdline: async () => "node\0--session-id\0from-cmd\0",
+            processEnv: { BRIDGE_SESSION_ID: UUID },
             logger: silentLogger,
         });
-        expect(await det.detect()).toBe("from-cmd");
+        await expect(det.detect()).resolves.toBe(UUID);
     });
 
-    it("detect falls back to env when cmdline missing", async () => {
-        const det = new SessionDetector({
-            parentPid: 1,
-            envValue: "from-env",
-            readCmdline: async () => "node\0--no-id\0",
-            logger: silentLogger,
-        });
-        expect(await det.detect()).toBe("from-env");
+    it("throws fail-fast when BRIDGE_SESSION_ID is unset (AD-12)", async () => {
+        const det = new SessionDetector({ processEnv: {}, logger: silentLogger });
+        await expect(det.detect()).rejects.toThrow(/BRIDGE_SESSION_ID env var not set/);
     });
 
-    it("detect throws when both cmdline and env are missing (fail-fast, P2-4)", async () => {
+    it("throws fail-fast when BRIDGE_SESSION_ID is empty string", async () => {
         const det = new SessionDetector({
-            parentPid: 1,
-            envValue: undefined,
-            // process.env を空に差し替え。テストランナー自体の env (CLAUDE_CODE_SESSION_ID
-            // が claude code 配下なら勝手に入る) から拾わないため。
-            processEnv: {},
-            readCmdline: async () => "node\0",
+            processEnv: { BRIDGE_SESSION_ID: "" },
             logger: silentLogger,
         });
-        await expect(det.detect()).rejects.toThrow(/session_id not found/);
+        await expect(det.detect()).rejects.toThrow(/BRIDGE_SESSION_ID env var not set/);
     });
 
-    it("detect picks up CLAUDE_CODE_SESSION_ID env (Claude Code 2.x default)", async () => {
+    it("throws when BRIDGE_SESSION_ID is not a valid UUID (refuse to corrupt AD-12)", async () => {
         const det = new SessionDetector({
-            parentPid: 1,
-            envValue: undefined,
-            processEnv: { CLAUDE_CODE_SESSION_ID: "from-claude-code-env" },
-            readCmdline: async () => "node\0",
+            processEnv: { BRIDGE_SESSION_ID: "not-a-uuid" },
             logger: silentLogger,
         });
-        await expect(det.detect()).resolves.toBe("from-claude-code-env");
+        await expect(det.detect()).rejects.toThrow(/not a valid UUID/);
     });
 
-    it("detect falls back to legacy CLAUDE_SESSION_ID env when newer var is absent", async () => {
+    it("accepts upper-case UUID characters", async () => {
+        const upper = UUID.toUpperCase();
         const det = new SessionDetector({
-            parentPid: 1,
-            envValue: undefined,
-            processEnv: { CLAUDE_SESSION_ID: "from-legacy-env" },
-            readCmdline: async () => "node\0",
+            processEnv: { BRIDGE_SESSION_ID: upper },
             logger: silentLogger,
         });
-        await expect(det.detect()).resolves.toBe("from-legacy-env");
-    });
-
-    it("detect handles cmdline read failure gracefully", async () => {
-        const det = new SessionDetector({
-            parentPid: 1,
-            envValue: "from-env",
-            readCmdline: async () => { throw new Error("EACCES"); },
-            logger: silentLogger,
-        });
-        expect(await det.detect()).toBe("from-env");
+        await expect(det.detect()).resolves.toBe(upper);
     });
 });
