@@ -1146,7 +1146,7 @@ private suspend fun handleGesture(which: GestureKind) {
         GestureKind.SWIPE_FORWARD -> {
             // 送信確定: confirming を畳んでから send()。inputText snapshot を
             // 同期的に取ることで、launch 内で前回 send の clearInput() 結果を
-            // 読んでしまう race も防ぐ (P1-4)。
+            // 読んでしまう race も防ぐ (NFR-13 atomicity)。
             repository.setConfirming(sessionIdAtGesture, false)
             val snapshot = repository.inputText.value
             repository.send(snapshot)
@@ -1847,7 +1847,7 @@ wrapper はその後 `exec claude --mcp-config <生成 path> --session-id <uuid>
 - Claude Code 2.x が MCP child を node ラッパー経由で spawn → ppid 1 hop では届かない
 - spawn topology のバージョン差で壊れる fragility
 
-を回避できる。Bridge 側のコードも素直になる。
+を回避できる。Bridge 側のコードも process-walk 方式比で ~3 倍小さくなる (env を 1 行読むだけ vs `/proc/<ppid>` を最大 10 hop 登る + 各 step で cmdline parse)。
 
 ##### scope 外
 

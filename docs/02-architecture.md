@@ -690,7 +690,7 @@ Phone の network 状態変化 (WiFi 切替 / Tailscale 接続 / アンメッシ
 
 ## 7. 横断的設計判断 (ADR)
 
-### 7.1 AD-03: mode + payload atomicity (NFR-13 / P1-4 解消)
+### 7.1 AD-03: mode + payload atomicity (NFR-13)
 
 **問題**: `current_mode` と `pending_permission` のようなフィールドを別 wire で push する素朴な構造では、Glass / Phone 双方で 1 描画フレーム内に状態が乖離する hazard がある。
 
