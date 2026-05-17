@@ -27,21 +27,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Phone app の `Application` サブクラス。Phase 3 §9.1。
- *
- * - **AppContainer**: 手動 DI。Hilt は本プロジェクト範囲では入れない。
- *   Repository / AppLifecycleController を Application スコープで singleton 化。
- * - **`containerOrNull`**: PermissionActionReceiver が kill 経路判定に使う。
- *   Application は process kill 中も "exists" だが、`container` は onCreate
- *   完了後にしか触れない (== isInitialized 相当)。
- *
- * 起動順序:
- *   1. EncryptedSharedPreferences (TokenStore) を load
- *   2. NotificationFactory.ensureChannels — 通知 channel 作成 (idempotent)
- *   3. AppContainer を build (Repository + lifecycle)
- *   4. Repository.initialize() を applicationScope で suspend 起動
- *      (履歴 / settings 復元)。完了は待たない (UI は uiState の collect で逐次更新)。
- *   5. ChannelService を startForegroundService (Hub 接続常駐)
+ * Phone app の `Application` (docs/03 §3.3.6)。手動 DI、起動順序、`containerOrNull` の
+ * 生存判定、MIC FGS eligibility 二重ガードは §3.3.6.1-3.3.6.4 を参照。
  */
 class PhoneApplication : Application() {
     private val log = StructuredLog("channel.app")
@@ -49,14 +36,12 @@ class PhoneApplication : Application() {
     @Volatile
     private var _container: AppContainer? = null
 
-    /** onCreate 完了後にだけ非 null。生存判定にこちらを使う (PermissionActionReceiver §3.8)。 */
+    /** docs/03 §3.3.6.2: kill 経路の Receiver から in-proc / out-of-proc 判定に使う。 */
     val containerOrNull: AppContainer? get() = _container
 
-    /** 通常コード経路。kill 中の Receiver からは containerOrNull で安全に確認すること。 */
     val container: AppContainer
         get() = _container ?: error("AppContainer accessed before PhoneApplication.onCreate finished")
 
-    /** Repository などの Application-scope coroutine。kill されるまで生存。 */
     var applicationScope: CoroutineScope? = null
         private set
 
@@ -90,10 +75,7 @@ class PhoneApplication : Application() {
         )
 
         scope.launch { repository.initialize() }
-        // ChannelService を常駐起動。lifecycle 状態は AppLifecycleController.channelRunning に反映。
         scope.launch { lifecycle.startChannel(applicationContext) }
-        // Glass relay / dispatcher を Application scope で常駐起動。CXR-L sender が
-        // null の間は何も emit しないため早めに start しても副作用は無い。
         glassRelay.start()
         glassEventDispatcher.start()
 
@@ -101,15 +83,11 @@ class PhoneApplication : Application() {
     }
 
     override fun onTerminate() {
-        // エミュレータでしか呼ばれない契約 (実機では process kill が先)。
-        // 念のため AppLifecycleController.shutdownAll を best-effort で呼ぶ。
+        // docs/03 §3.3.6.3: エミュレータでしか呼ばれない契約。best-effort で shutdownAll。
         applicationScope?.launch { _container?.lifecycle?.shutdownAll(applicationContext) }
         super.onTerminate()
     }
 
-    /**
-     * 手動 DI コンテナ。test では Repository をテストダブルに差し替えて使う。
-     */
     class AppContainer(
         val repository: ChannelRepository,
         val lifecycle: AppLifecycleController,
@@ -118,11 +96,6 @@ class PhoneApplication : Application() {
         val glassEventDispatcher: GlassEventDispatcher,
     )
 
-    /**
-     * AppLifecycleController.FgsOperations 実装。Application Context から FGS を起動 / 停止する。
-     * stop は `stopService` を使用 (FGS の自殺は OS-side で startService より弱いため,
-     * Application が外部から畳むこの経路では stopService が安定)。
-     */
     private class RealFgsOperations : AppLifecycleController.FgsOperations {
         override fun startChannelFgs(context: Context) {
             ContextCompat.startForegroundService(
@@ -142,14 +115,8 @@ class PhoneApplication : Application() {
         override fun stopGlassFgs(context: Context) {
             context.stopService(Intent(context, GlassConnectionService::class.java))
         }
+        /** docs/03 §3.3.6.4: MIC FGS eligibility 二重ガードの dispatcher 側 (第一防衛線)。 */
         override fun startMicFgs(context: Context) {
-            // FGS-microphone は Android 14+ で RECORD_AUDIO runtime granted + app foreground
-            // でなければ `startForeground(MICROPHONE)` が SecurityException で落ちる
-            // (targetSDK=36 で更に厳格化)。`startForegroundService` を呼んだ後 5s 以内に
-            // `startForeground` を呼ばないと ForegroundServiceDidNotStartInTimeException も
-            // 飛ぶので、**dispatcher 段階で eligibility を判定** し、不適合なら
-            // `startForegroundService` 自体を呼ばない。`MicForegroundService.onCreate` 側に
-            // も同じ guard を置いてあるが、そちらは OS triggered restart 等の double-defense。
             val granted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO,

@@ -20,17 +20,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
- * Phase 3 §3.3.2 常駐 FGS-dataSync。
- *
- * 役割:
- *   - `ChannelRepository.connectivity` を購読し常駐通知のテキストを更新
- *   - `ChannelRepository.events` を購読し reply / permission 通知を post
- *   - MicForegroundService を直接 start/stop しない (FGS 同士の結合を避ける、
- *     AppLifecycleController 経由のみ)
- *
- * `applicationContext` 経由で `PhoneApplication.container` から
- * Repository / Settings を取得。Service プロセスが Application 死亡時に起動する
- * paranoid シナリオは Phase 4 範囲外。
+ * 常駐 FGS-dataSync (docs/03 §3.3.2)。permission 通知の 3 経路 cancel は §3.3.2.1、
+ * cold-start gap 対策は §3.3.2.2 / §5.3.1、`START_STICKY` 選択理由は §3.3.2.3 を参照。
  */
 class ChannelService : Service() {
     private val log = StructuredLog("channel.service")
@@ -41,17 +32,8 @@ class ChannelService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // P1-1 defensive: Application.onCreate が先行する契約だが、START_STICKY による
-        // 再起動経路で Application 再初期化が遅延した場合に通知が silent fail するのを防ぐ。
-        // ensureChannels は idempotent。
         NotificationFactory.ensureChannels(this)
         startForegroundCompat("起動中...")
-        // P2-1 of review: cold-start gap 対策。Application 死亡中に発生した permission の
-        // 通知が shade に残っていて、起動時には `_pendingPermissions` が空で start するので
-        // 後続の diff collector では cancel されない (lastIds=empty / current=empty で
-        // removed が常に empty)。channel = PERMISSION の通知を一旦全 cancel し、Hub 側の
-        // 再 push (FR-HU-14: snapshot 後に個別 permission を続けて送る) で必要なものは
-        // 再 notify されるので、shade の幽霊通知が確実に消える。
         cancelStaleStartupPermissionNotifications()
         observerJob = scope.launch { observe() }
         log.info("on_create")
@@ -75,12 +57,6 @@ class ChannelService : Service() {
         super.onDestroy()
     }
 
-    /**
-     * P3-4 注釈: `START_STICKY` を選ぶ理由は、ChannelService は Hub 接続維持が役割で、
-     * intent 自体に処理対象データを持たない (PhoneApplication.onCreate が再起動経路で先に
-     * 走るため Repository も再構築済み)。redeliver する command は無い。kill 直後に
-     * Application が再 init される際は ensureChannels も onCreate で idempotent 呼び出し。
-     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     private suspend fun observe() {
@@ -94,15 +70,7 @@ class ChannelService : Service() {
                 startForegroundCompat(connectionLabel(conn))
             }
         }
-        // permission 通知の cancel: pendingPermissions の diff を取り、消えた id の
-        // 通知を NotificationManager.cancel する。これで以下の経路を統一処理:
-        //   - 個別 verdict 成功 (VerdictDispatchService が extras 経由で cancel するのと、
-        //     PermissionActionReceiver が optimistic pre-dispatch cancel するのに加えた
-        //     3 経路目。すべて idempotent なので重複 OK)
-        //   - PermissionAbort 受信
-        //   - permission_snapshot で空集合 reconcile (Hub 再起動経路、FR-HU-15)
-        // ChannelService が死んでた間の差分は startup の cancelStaleStartupPermissionNotifications
-        // で別途処理する (P2-1 cold-start gap 対策)。
+        // docs/03 §3.3.2.1: 3 経路 cancel を pendingPermissions の diff に集約。
         scope.launch {
             var lastIds = emptySet<String>()
             repo.pendingPermissions.collect { current ->
@@ -129,16 +97,13 @@ class ChannelService : Service() {
                     baseUrl = settingsFlow.value.baseUrl,
                     token = settingsFlow.value.token,
                 )
-                is ChannelEvent.Sent -> Unit // UI 内通知のみ。OS 通知不要。
+                is ChannelEvent.Sent -> Unit
             }
         }
     }
 
     private fun notifyReply(notifMgr: NotificationManager?, event: ChannelEvent.Reply, repo: ChannelRepository) {
-        // P1-3: session 毎にユニークな notification id にすることで、別 session の reply が
-        // 同時に shade に並んだとき PendingIntent extras が上書きされる問題を解消する。
-        // 同一 session の 2 件目は既存通知を update (NOTIF_REPLY_BASE + session.hashCode).
-        // sessionId が null (broadcast 系) は 0 にフォールバック。
+        // docs/03 §3.6.4.1: notifId = NOTIF_REPLY + sessionId.hashCode() (session 単位)。
         val notifId = NotificationFactory.NOTIF_REPLY + (event.sessionId?.hashCode() ?: 0)
         notifMgr?.notify(
             notifId,
@@ -153,7 +118,7 @@ class ChannelService : Service() {
         baseUrl: String,
         token: String,
     ) {
-        // notification id は request_id hash で session 横断ユニーク化。
+        // docs/03 §3.6.4.1: id = NOTIF_PERMISSION_BASE + requestId.hashCode() (request 単位)。
         val id = NotificationFactory.NOTIF_PERMISSION_BASE + event.pending.requestId.hashCode()
         notifMgr?.notify(
             id,
