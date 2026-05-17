@@ -19,27 +19,11 @@ import java.util.Base64
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * `MicCapture` + `TranscriptionWs` を束ねた transcription facade。Phase 3 §3.2.5。
+ * `MicCapture` + `TranscriptionWs` を束ねた transcription facade。docs/03 §3.2.5.3
+ * (ライフサイクル / 同期 start-stop / generation gating)、§3.2.5.4 (pre-buffer)、
+ * §3.2.5.5 (Base64)、§3.2.5.7 (backpressure)、§3.2.5.8 (error blob 切り詰め) を参照。
  *
- * 公開 flow:
- *   - [state]: `Idle` / `Connecting` / `Listening(partial)` / `Error(message)`
- *   - [finalized]: completed transcript の確定文字列 (1 文単位)。
- *
- * **同期 vs 非同期** (P1-1, P1-2 対応):
- *   - `start` / `stop` は UI スレッドから呼ばれることを前提に状態遷移を **同期** に行う
- *     (scope.launch を介さない)。これにより呼び出し直後に `state.value` が更新される。
- *   - 副作用 (collect 等) のみ scope.launch で実行する。
- *   - `start → stop → start` を高速連打した場合の race は [generation] (AtomicInteger) を
- *     bump し、遅延到着した event / frame を生成番号で gating することで防ぐ (P1-4)。
- *
- * pre-buffer 戦略 (§3.2.5):
- *   - WS 接続成功直後の `session.update` ack まで音声を送ると drop されることがある。
- *   - SessionReady を受けるまで MicCapture からのフレームを内部 `ArrayDeque` に貯める。
- *   - **drop policy** は `pollLast` (新しい方を捨てる) — pre-buffer の目的は session 冒頭
- *     の発話を残すこと。`pollFirst` だと冒頭を捨てる逆効果になる (P2-3 fix)。
- *   - 上限 250 frame (~10s @ 40ms)。
- *
- * **テスト seam**: `transportFactory` / `micFactory` を差し替えて JVM unit test 可能。
+ * テスト seam: `transportFactory` / `micFactory` で fake transport / mic を注入可能。
  */
 class TranscriptionClient internal constructor(
     private val transportFactory: (TranscriptionConfig) -> TranscriptionTransport,
@@ -51,10 +35,6 @@ class TranscriptionClient internal constructor(
         micFactory = { config, scope -> MicCapture(config, scope) },
     )
 
-    /**
-     * Application scope を共有したいときの便利コンストラクタ (P2-2 fix)。
-     * InputController から呼ばれ、子 scope を介して lifecycle 連動させる。
-     */
     constructor(scope: CoroutineScope) : this(
         transportFactory = { config -> TranscriptionWs(config) },
         micFactory = { config, scope2 -> MicCapture(config, scope2) },
@@ -73,17 +53,12 @@ class TranscriptionClient internal constructor(
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
-    // emit を block しないよう extraBufferCapacity を大きめに確保。
-    // event 経路 (`onEvent`) からは scope.launch 経由で emit して、collector の
-    // backpressure が event 流通を止めないようにする (P2-4)。
     private val _finalized = MutableSharedFlow<String>(
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.SUSPEND,
     )
     val finalized: SharedFlow<String> = _finalized.asSharedFlow()
 
-    // ライフサイクル世代。start / stop / internalTeardown のたびにインクリメントし、
-    // 古い session の event / frame を gating する (P1-4)。
     private val generation = AtomicInteger(0)
 
     @Volatile private var transport: TranscriptionTransport? = null
@@ -95,10 +70,6 @@ class TranscriptionClient internal constructor(
     private val preBuffer = ArrayDeque<String>()
     private val partialBuf = StringBuilder()
 
-    /**
-     * 同期的に Connecting に遷移し、副作用 (collect 開始 / transport.connect / mic.start)
-     * は内部で scope.launch する。重複 start は idempotent。
-     */
     fun start(config: TranscriptionConfig) {
         if (!config.isValid) {
             log.warn("transcription_start_invalid_config")
@@ -127,12 +98,10 @@ class TranscriptionClient internal constructor(
         log.info("transcription_started", "generation" to myGen)
     }
 
-    /** 同期的に Idle に遷移し teardown する。 */
     fun stop() {
         teardownToState(State.Idle, "stop_called")
     }
 
-    /** scope ごと畳む。 */
     fun dispose() {
         stop()
         scope.cancel()
@@ -157,17 +126,13 @@ class TranscriptionClient internal constructor(
 
     private fun routeFrame(gen: Int, frame: ByteArray) {
         if (gen != generation.get()) return
-        // P3-6: java.util.Base64.getEncoder() は RFC4648 (padded) を返す。OpenAI Realtime
-        // API は padded base64 を受け入れる (実機検証済)。android.util.Base64 を使うと
-        // JVM unit test で empty string が返るためデフォルトで避ける。
         val b64 = base64.encodeToString(frame)
         val sendNow = synchronized(bufferLock) {
             if (gen != generation.get()) return
             if (ready) true
             else {
                 if (preBuffer.size >= MAX_PREBUFFER_CHUNKS) {
-                    // P2-3: pre-buffer の目的は冒頭の発話を残すこと。古い方ではなく
-                    // 新しい方を捨てる (= pollLast)。
+                    // docs/03 §3.2.5.4: 新しい方を捨てる (冒頭の発話を残す)。
                     preBuffer.pollLast()
                     log.warn("transcription_prebuffer_overflow_dropped_newest")
                 }
@@ -193,14 +158,13 @@ class TranscriptionClient internal constructor(
             is TranscriptionEvent.Completed -> {
                 synchronized(bufferLock) { partialBuf.clear() }
                 if (gen != generation.get()) return
-                // P2-4: emit を scope.launch に切り出し、event collector の backpressure
-                // (subscriber が遅い時) によって後続 Delta/Closed が遅延しないようにする。
+                // docs/03 §3.2.5.7: subscriber が遅くても後続 event を遅延させないため launch で切り出す。
                 scope.launch { _finalized.emit(event.text) }
                 _state.value = State.Listening("")
             }
             is TranscriptionEvent.Error -> {
                 log.warn("transcription_error", "message" to event.message.take(256))
-                // P3-7: 4KB の error blob を State に乗せて UI / ログを汚さない。
+                // docs/03 §3.2.5.8: 4KB error blob を 512 文字に切り詰める。
                 teardownToState(State.Error(event.message.take(512)), "wire_error")
             }
             TranscriptionEvent.Closed -> {
@@ -226,7 +190,6 @@ class TranscriptionClient internal constructor(
         if (gen != generation.get()) return
         val t = transport ?: return
         drained.forEach { t.sendAudio(it) }
-        // P1-4: gen が古ければ Listening への遷移を許可しない (stop → flush race)。
         if (gen == generation.get()) {
             _state.value = State.Listening(partialBuf.toString())
         }

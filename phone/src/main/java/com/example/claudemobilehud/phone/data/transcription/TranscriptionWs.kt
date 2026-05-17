@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * OpenAI Realtime API (transcription-only) への WebSocket クライアント。
  * 内部 seam として [TranscriptionTransport] を満たす。
  *
- * Phase 3 §3.2.5。設計判断:
+ * docs/03 §3.2.5 (SessionReady 後に pre-buffer flush は §3.2.5.4)。設計判断:
  *   - 接続成功時に `session.update` を 1 回送り、ack (= SessionReady) を待ってから
  *     呼び出し側 (TranscriptionClient) が音声送信を開始する。
  *   - `pingInterval=15s`: OpenAI 側の idle timeout (~60s) より十分短く設定して

@@ -823,6 +823,7 @@ class InputController(private val applicationContext: Context) {
     val transcription = TranscriptionClient()
     val text: StateFlow<String>
     val micSource: StateFlow<MicSource>  // 録音時は GLASS / PHONE_FALLBACK
+    val errors: SharedFlow<PhoneWireError>  // BT SCO 失敗等の transient error
 
     fun setCurrentSession(id: String?)
     fun update(text: String)
@@ -833,7 +834,78 @@ class InputController(private val applicationContext: Context) {
 }
 ```
 
-`startFromGlass` で `AudioRouter.routeToGlassMic` の戻り値を `micSource` に反映 (FR-GL-44 / §6.8)。
+##### 3.2.5.1 session-per-draft 戦略
+
+`InputController` は **session ごとに draft (入力欄テキスト) を分離保持** する (`Map<String, String> inputBySession`)。current session は Repository から `setCurrentSession(id)` で伝えてもらい、`text: StateFlow<String>` は current session の draft を派生させる。
+
+理由: reply auto-switch (Phone IDLE 中の reply 受信で自動 session 切替、§3.2.1.3.1) や手動 session 切替が発生する設計のため、global な単一 draft だと「旧 session で書きかけた文字列が新 session に持ち込まれる」事故が起きる。
+
+`update(text)` は `currentSessionId == null` の場合は破棄して warn log を残す (UI 側は入力欄を disable する契約)。`clear()` は current session の draft を消し、録音中なら `stop()` も呼ぶ。
+
+##### 3.2.5.2 録音中の session 固定
+
+録音開始時点の current session を `transcriptionSessionId` に固定し、partial / finalized event の書き込み先を確定する。**録音中の session 切替は UI 構造上発生しない** (録音中は会話画面に固定) 契約のもとで成立する。
+
+`stop()` 経路では:
+
+```
+transcriptionSessionId = null    // ← 先に null にする
+transcription.stop()             // 同期 teardown
+audioRouter?.restore()           // routedBt なら復元
+micSource = PHONE_FALLBACK
+```
+
+`transcriptionSessionId = null` を `transcription.stop()` より**前**に置くことで、`Repository.send` から `stop()` → 直後の `clearInput()` の間に inflight な finalized event が来ても、`transcriptionSessionId == null` で gating されて新 session に書き込まれない (P2-1 race 抑止)。
+
+##### 3.2.5.3 `TranscriptionClient` ライフサイクル
+
+公開 flow:
+- `state: StateFlow<State>` — `Idle` / `Connecting` / `Listening(partial)` / `Error(message)`
+- `finalized: SharedFlow<String>` — 確定 transcript (1 文単位)
+
+**同期 vs 非同期** (P1-1, P1-2):
+- `start` / `stop` は UI スレッドから呼ばれる前提で**状態遷移を同期に行う** (scope.launch を介さない)。呼び出し直後に `state.value` が更新されていることが Repository 側の `wasListening` 判定 (§3.4.2 `GestureKind.TAP`) で必要
+- collector (transport.events.collect / mic.frames.collect) と `_finalized.emit` だけを `scope.launch` で切り出す。`transport.connect()` / `mic.start()` は block しない契約なので `start()` 本体から同期呼び出しでよい
+
+**generation gating** (P1-4):
+- `start` / `stop` / `teardownToState` のたびに `generation: AtomicInteger` を bump
+- 遅延到着した event / frame は `routeFrame(gen, ...)` / `onEvent(gen, ...)` の冒頭で `gen != generation.get()` なら return
+- `start → stop → start` を高速連打した際の race を構造的に防ぐ
+
+`dispose()` は `stop()` + `scope.cancel()`。Application 終了時 / テスト後片付け用。
+
+##### 3.2.5.4 pre-buffer 戦略
+
+WS `connect` 直後 〜 OpenAI Realtime API の `session.update` ack 受信までの間に届いた audio frame は drop されることが実機で確認されている。`TranscriptionClient` は SessionReady (= session.update ack) を受けるまで `MicCapture` の frame を内部 `ArrayDeque<String>` (base64 済) に貯め、SessionReady で一括 flush する。
+
+- **上限**: 250 frame (~10s @ 40ms 1 frame)
+- **drop policy** (P2-3): 上限到達時は `pollLast` で**新しい方を捨てる**。pre-buffer の目的は session 冒頭の発話を保存することなので、`pollFirst` (古い方を捨てる) は逆効果
+
+##### 3.2.5.5 Base64 エンコーダ選択 (P3-6)
+
+`java.util.Base64.getEncoder()` を使用する。理由:
+- OpenAI Realtime API は RFC 4648 padded (= `java.util.Base64` のデフォルト) を受け入れる (実機検証済)
+- `android.util.Base64` を使うと **JVM unit test で empty string が返る** (Android 実機リンクされていないため)。テスト可能性を優先して `java.util.Base64` に統一
+
+##### 3.2.5.6 Glass mic 経路と `BtScoUnavailable` contract (P1-3)
+
+`startFromGlass` は `audioRouter?.routeToGlassMic()` を呼んで BT SCO ルーティングを試みる:
+
+| `audioRouter` 状態 | `routeToGlassMic()` 戻り値 | 副作用 |
+|---|---|---|
+| `null` (4b2 段階で未注入) | — | `PHONE_FALLBACK` + `errors.emit(BtScoUnavailable)` |
+| 注入済 | `true` | `MicSource.GLASS` + `routedBt = true` (stop 時に `restore()` を呼ぶ) |
+| 注入済 | `false` (4c で BT SCO 取得失敗) | `PHONE_FALLBACK` + `errors.emit(BtScoUnavailable)` |
+
+`errors` は `SharedFlow<PhoneWireError>` で Repository → UI に転送し、§3.7 の `BtScoUnavailable → Banner("内蔵マイクを使用中")` 契約に従って表示する (FR-GL-44 / §6.8)。
+
+##### 3.2.5.7 backpressure 制御 (P2-4)
+
+`finalized.emit` は `scope.launch { _finalized.emit(event.text) }` で切り出す。`onEvent` 内で直接 emit すると `SharedFlow` (SUSPEND policy) の subscriber が遅い場合に collector が止まり、後続の `Delta` / `Closed` event 処理まで遅延する。launch で切り離すことで event 流通そのものを保護する。
+
+##### 3.2.5.8 4KB error blob のサニタイズ (P3-7)
+
+`TranscriptionEvent.Error` の `message` は OpenAI API から最大数 KB の JSON が来る可能性があるので、`State.Error(event.message.take(512))` で 512 文字に切り詰めてから State に乗せる。warn log 側も `take(256)` で別途切り詰める。
 
 ### 3.3 service 層
 

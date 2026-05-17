@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
 
 /**
  * AudioRecord 経由で 24kHz mono PCM16 を 1 frame=[TranscriptionConfig.chunkMs] ms 単位で
- * `frames` に流す。Phase 3 §3.2.5。
+ * `frames` に流す (docs/03 §3.2.5、TranscriptionClient pre-buffer は §3.2.5.4)。
  *
  * - `VOICE_RECOGNITION` audio source を使い、Android 側で AEC / NS が薄く効くようにする。
  *   音楽 mic ではない (歌の transcription はターゲットではない)。

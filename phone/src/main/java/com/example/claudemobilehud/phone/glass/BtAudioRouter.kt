@@ -6,8 +6,8 @@ import com.example.claudemobilehud.phone.data.InputController
 import com.example.claudemobilehud.phone.log.StructuredLog
 
 /**
- * `InputController.AudioRouter` を Bluetooth SCO / LE Audio Headset で実装する。
- * Phase 3 §3.2.5。
+ * `InputController.AudioRouter` を Bluetooth SCO / LE Audio Headset で実装する
+ * (docs/03 §3.2.5、Glass mic 経路の BtScoUnavailable contract は §3.2.5.6)。
  *
  * Rokid Glass は BT 通話デバイスとして見えるため、phone の Communication Device を
  * これに切り替えると `AudioRecord` が自然と glass mic を読むようになる (CXR-L は不要)。
