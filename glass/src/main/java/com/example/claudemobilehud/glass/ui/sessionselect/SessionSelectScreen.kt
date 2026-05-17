@@ -33,30 +33,19 @@ import com.example.claudemobilehud.glass.ui.theme.TextInactive
 import com.example.claudemobilehud.protocol.SessionSummaryPayload
 
 /**
- * Phase 3 §4.4 / FR-GL-20〜22 の session 選択画面。
- *
- * - 前後 (SwipeForward/Back): カーソル移動
- * - タップ (Tap): 決定 → phone へ sendSelectSession + 会話画面へ遷移
- * - ダブルタップ (DoubleTap): app 終了
- *
- * カーソル index は glass-local state。phone 側 currentSessionId が来たら自動でその位置へ
- * 補正する (再起動後の復元 / 別 session が現役になった時の追従)。
+ * Glass session 選択画面 (docs/03 §4.9、FR-GL-20〜22)。前後でカーソル移動 / Tap 決定 /
+ * DoubleTap 終了。index を単一 State として保持する根拠 (§4.9.1) と current 追従を初回のみ
+ * に限定する根拠 (§4.9.2 P2-A) は §4.9 を参照。
  */
 @Composable
 fun SessionSelectScreen(onSelected: () -> Unit, onExit: () -> Unit) {
     val sessions by GlassBridge.sessions.collectAsStateWithLifecycle()
     val current by GlassBridge.currentSessionId.collectAsStateWithLifecycle()
 
-    // remember(sessions.size) でキー指定すると sessions が空 → 非空に変わったタイミングで
-    // mutableIntStateOf インスタンスが差し替わり、LaunchedEffect が古い State を持ち続けて
-    // 反映されなくなる。index は単一 State として保持し、別 effect で current / サイズに
-    // 合わせて補正する。
+    // docs/03 §4.9.1: 単一 State として保持 (key 付き remember は古い State を握る hazard)。
     var index by remember { mutableIntStateOf(0) }
 
-    // P2-A of 5b review: current への "追従" は **初回マウント時のみ** に限定する。
-    // ユーザが session B にカーソルを動かしている最中に phone 側 currentSessionId が C に
-    // 変わると (reply auto-switch 等)、カーソルが勝手に C へジャンプする UI hazard が
-    // あった。FR-GL-20〜22 は「カーソル位置の追従」を要求していない。
+    // docs/03 §4.9.2 (P2-A): current 追従は初回マウントのみ。以降はユーザ意志を尊重 + size clamp。
     var didInitialAlign by remember { mutableStateOf(false) }
     LaunchedEffect(sessions, current) {
         if (!didInitialAlign && sessions.isNotEmpty()) {
@@ -64,7 +53,6 @@ fun SessionSelectScreen(onSelected: () -> Unit, onExit: () -> Unit) {
             if (byCurrent >= 0) index = byCurrent
             didInitialAlign = true
         }
-        // size 変化に追随した clamp はユーザ意志を上書きしないので常に走らせる。
         if (sessions.isEmpty()) {
             index = 0
         } else if (index >= sessions.size) {

@@ -48,14 +48,11 @@ import com.example.claudemobilehud.protocol.PendingPermissionPayload
 import com.example.claudemobilehud.protocol.TranscriptState
 
 /**
- * Phase 3 §4.4 + FR-GL-30〜33 / FR-GL-50〜62 の会話画面。
- *
- * - 履歴 (messages) は HUD 中央のフレーム内 LazyColumn に表示。
- * - 入力中テキスト (inputText) と録音中 partial (transcriptText) は画面下に。
- * - mode 別に HintLine / 入力 UI が切り替わる。
- *
- * gesture ハンドリングは [ConversationStateHolder] に委譲。state は holder.state を 1 つだけ
- * 観測する (mode + cursor の組合せ)。
+ * HUD 会話画面 (docs/03 §4.4 / §4.8、FR-GL-30〜33 / FR-GL-50〜62)。
+ * onBack 間接参照 (§4.8.1)、1 swipe = 1 行 (§4.8.2)、CONFIRMING 中の auto-scroll 抑制
+ * (§4.8.3)、MessageList key (§4.8.4 P2-F)、INCOMING 強調 (§4.8.5)、フォント定数集約
+ * (§4.8.6 P3-B)、ScreenAwakeManager 連動 (§4.8.7)、空 input Confirming 防御 (§4.8.8 P3-E)
+ * を参照。
  */
 @Composable
 fun ConversationScreen(onBack: () -> Unit) {
@@ -65,8 +62,7 @@ fun ConversationScreen(onBack: () -> Unit) {
     val messages by GlassBridge.messages.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
-    // onBack ラムダは親 NavHost の recomposition で別インスタンスに差し替わり得るので、
-    // remember に直接キャプチャすると初回値を握り続ける。rememberUpdatedState で間接参照する。
+    // docs/03 §4.8.1: NavHost recomposition で別インスタンスに変わるため rememberUpdatedState で間接参照。
     val currentOnBack = rememberUpdatedState(onBack)
     val holder = remember {
         ConversationStateHolder(
@@ -82,8 +78,7 @@ fun ConversationScreen(onBack: () -> Unit) {
     LaunchedEffect(holder) {
         GestureBus.events.collect { holder.onGesture(it) }
     }
-    // 1 swipe = 1 行分のスクロール量 (12sp 本文 + Material default の line-height multiplier
-    // ≈ 16sp 程度) を pixel に変換して animateScrollBy。コンテンツ末端は自動でクランプ。
+    // docs/03 §4.8.2: 1 swipe = LINE_HEIGHT_SP 分の animateScrollBy。
     val lineHeightPx = with(LocalDensity.current) { LINE_HEIGHT_SP.sp.toPx() }
     LaunchedEffect(holder) {
         holder.scrollRequest.collect { lines ->
@@ -91,8 +86,7 @@ fun ConversationScreen(onBack: () -> Unit) {
         }
     }
 
-    // display 電源は ScreenAwakeManager に一任。会話画面が生きている間 STARTED/STOPPED
-    // 連動で SCREEN_BRIGHT_WAKE_LOCK を握る。詳細は ScreenAwakeManager を参照。
+    // docs/03 §4.8.7: STARTED 連動で SCREEN_BRIGHT_WAKE_LOCK を握る。
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val handle = ScreenAwakeManager.acquireWhileStarted(context, lifecycleOwner.lifecycle)
@@ -100,8 +94,7 @@ fun ConversationScreen(onBack: () -> Unit) {
     }
 
     val frameHeight = LocalConfiguration.current.screenHeightDp.dp * 0.6f
-    // CONFIRMING / PERMISSION_CONFIRMING のあいだは最新メッセージ追従を一旦止める
-    // (確認操作中に勝手にスクロールされると気持ち悪いので)。
+    // docs/03 §4.8.3: CONFIRMING 中は確認対象を見失わないよう auto-scroll を抑制。
     val autoScroll = state !is State.Confirming && state !is State.PermissionConfirming
 
     Column(
@@ -155,9 +148,7 @@ private fun MessageList(
         }
         return
     }
-    // P2-F of 5b review: key に `lastOrNull()?.id` を含める。size + last.text.length が
-    // 同じでも別 message に切替わった場合 (例: 旧末尾削除 + 新追加 → 同 size、別 id) を
-    // 確実に補足する。streaming reply の text 伸長は length で補足。
+    // docs/03 §4.8.4 (P2-F): size + last.id + last.text.length で同一 size 別 id を補足。
     LaunchedEffect(
         messages.size,
         messages.lastOrNull()?.id,
@@ -184,8 +175,7 @@ private fun MessageRow(message: ChatMessagePayload) {
         MessageRole.INCOMING -> "🤖"
         MessageRole.SYSTEM -> "ℹ️"
     }
-    // 強調は AI の返信 (INCOMING) に集中させる。HUD 上で「読みたい内容」だけが
-    // 明るく + 太字になるので、ログを過去にスクロールしても返信を拾いやすい。
+    // docs/03 §4.8.5: 強調は INCOMING のみ (HUD 上で読みたい内容を識別しやすく)。
     val isReply = message.role == MessageRole.INCOMING
     val color = if (isReply) TextGreen else TextInactive
     val weight = if (isReply) FontWeight.Bold else FontWeight.Normal
@@ -226,9 +216,7 @@ private fun InputLine(
 
 @Composable
 private fun ConfirmBar(input: String, choice: SendChoice) {
-    // P3-E of 5b review: input が空文字の Confirming は通常起きない (phone 側で送信前に
-    // clearInput → CONFIRMING 遷移は出ないはず) が、念のため防御。空のときは送信プレビュー
-    // 行をスキップし、HintLine + 送信/取消 の選択肢のみ表示する。
+    // docs/03 §4.8.8 (P3-E): 空 input Confirming の防御。プレビュー行をスキップ。
     Column {
         if (input.isNotEmpty()) {
             Text(
@@ -249,7 +237,6 @@ private fun ConfirmBar(input: String, choice: SendChoice) {
 @Composable
 private fun PermissionConfirmBar(pending: PendingPermissionPayload, choice: PermissionChoice) {
     Column {
-        // ツール名 + description を 1〜2 行で表示。HUD は小さいので説明文は折返し。
         Text(
             "🛠 ${pending.toolName}",
             color = TextGreen,
@@ -284,10 +271,7 @@ private fun ChoiceItem(label: String, focused: Boolean) {
     )
 }
 
-// P3-B of 5b review: HUD 文字サイズ + 行高を 1 か所に集約。`MESSAGE_FONT_SP` を変更すると
-// MessageRow / InputLine / ConfirmBar / PermissionConfirmBar が連動する。
-// `LINE_HEIGHT_SP` は MessageRow の fontSize + Arrangement.spacedBy(3.dp) を実機計測した値
-// で、`MESSAGE_FONT_SP` の 1.75 倍にあたる。フォント変更時はこの比率も再計測する。
+// docs/03 §4.8.6 (P3-B): HUD 文字サイズ + 行高の集約。LINE_HEIGHT_SP は MESSAGE_FONT_SP の約 1.75 倍 (実機計測)。
 private const val MESSAGE_FONT_SP = 12f
 private const val LINE_HEIGHT_SP = 21f
 

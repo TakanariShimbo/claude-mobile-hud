@@ -2643,7 +2643,111 @@ fun play(context: Context, kind: NotificationKind) = play(context, when (kind) {
 
 incoming 通知 collect 経路の glue (`MainActivity.notifications.collect`)。FR-GL-71 の chime 2 連は `play(Kind.INCOMING_PERMISSION)` 経由で `Handler.postDelayed(220ms)` する (§4.7.1)。
 
-### 4.8 構造化ログ
+### 4.8 `ConversationScreen` (会話画面)
+
+FR-GL-30〜33 / FR-GL-50〜62 の HUD 会話画面。`messages` (LazyColumn) + `inputText` + `transcriptText` を mode 別に切り替えて描画する。gesture は `ConversationStateHolder` (§4.4) に委譲し、画面は `holder.state` (mode + cursor) を 1 つだけ観測する。
+
+#### 4.8.1 `rememberUpdatedState` で `onBack` を間接参照
+
+```kotlin
+val currentOnBack = rememberUpdatedState(onBack)
+val holder = remember {
+    ConversationStateHolder(..., onBack = { currentOnBack.value() }, ...)
+}
+```
+
+`onBack` ラムダは親 `NavHost` の recomposition で別インスタンスに差し替わり得る。`remember` のクロージャに直接キャプチャすると **初回値を握り続ける** ので、`rememberUpdatedState` で間接参照して最新値に追従する。
+
+#### 4.8.2 1 swipe = 1 行スクロール
+
+```kotlin
+val lineHeightPx = with(LocalDensity.current) { LINE_HEIGHT_SP.sp.toPx() }
+LaunchedEffect(holder) {
+    holder.scrollRequest.collect { lines ->
+        listState.animateScrollBy(lines * lineHeightPx)
+    }
+}
+```
+
+`LINE_HEIGHT_SP = 21f` は `MESSAGE_FONT_SP = 12f` の **約 1.75 倍** (実機計測。`Arrangement.spacedBy(3.dp)` 込み)。フォント変更時は比率も再計測する。コンテンツ末端の clamp は `animateScrollBy` 側が自動でやる。
+
+#### 4.8.3 CONFIRMING 中の auto-scroll 抑制
+
+```kotlin
+val autoScroll = state !is State.Confirming && state !is State.PermissionConfirming
+```
+
+確認操作中に最新メッセージ追従で勝手にスクロールされるとユーザが操作対象を見失う UX hazard を避けるため、CONFIRMING / PERMISSION_CONFIRMING のあいだは scroll を止める。
+
+#### 4.8.4 `MessageList` の auto-scroll key (P2-F)
+
+```kotlin
+LaunchedEffect(
+    messages.size,
+    messages.lastOrNull()?.id,
+    messages.lastOrNull()?.text?.length,
+    autoScroll,
+) { ... }
+```
+
+- `size` だけでは「旧末尾削除 + 新追加 → 同 size、別 id」を補足できない → `lastOrNull()?.id` を含める
+- streaming reply の text 伸長は `lastOrNull()?.text?.length` で補足
+- `autoScroll` を key に含めることで、Confirming → 復帰時に最新位置へ追従
+
+#### 4.8.5 強調は INCOMING のみ
+
+`MessageRow` は `role == INCOMING` のときだけ `TextGreen` + `FontWeight.Bold`。OUTGOING / SYSTEM は `TextInactive` で控えめに。**HUD 上で「読みたい内容」(= AI の返信) だけが明るく + 太字** になるので、ログを過去にスクロールしても返信を拾いやすい UX。
+
+#### 4.8.6 `MESSAGE_FONT_SP` / `LINE_HEIGHT_SP` の集約 (P3-B)
+
+`private const val MESSAGE_FONT_SP = 12f` / `LINE_HEIGHT_SP = 21f` を file-private const にして、`MessageRow` / `InputLine` / `ConfirmBar` / `PermissionConfirmBar` の 4 か所で参照する。フォントサイズ変更は 1 か所で済む。
+
+#### 4.8.7 `ScreenAwakeManager` 連動
+
+```kotlin
+DisposableEffect(lifecycleOwner) {
+    val handle = ScreenAwakeManager.acquireWhileStarted(context, lifecycleOwner.lifecycle)
+    onDispose { handle.close() }
+}
+```
+
+会話画面が STARTED の間 `SCREEN_BRIGHT_WAKE_LOCK` を握る (詳細は `ScreenAwakeManager`)。`DisposableEffect` で離脱時に release を保証。
+
+#### 4.8.8 空 input の `Confirming` 防御 (P3-E)
+
+通常は phone 側で送信前に `clearInput → CONFIRMING 遷移` は出ない契約だが、`ConfirmBar` で **`input.isNotEmpty()` ガード**して送信プレビュー行をスキップする念のための防御。HintLine + 送信/取消の選択肢のみ表示。
+
+### 4.9 `SessionSelectScreen` (session 選択画面)
+
+FR-GL-20〜22 の session 一覧。前後 (Swipe) でカーソル移動、Tap で決定 → `sendSelectSession` + 会話画面に遷移、DoubleTap で app 終了。カーソル index は **glass-local state**。
+
+#### 4.9.1 `index` を `mutableIntStateOf` で **単一 State** として保持
+
+```kotlin
+var index by remember { mutableIntStateOf(0) }
+```
+
+`remember(sessions.size)` でキー指定すると sessions が空 → 非空に変わったタイミングで `MutableIntState` インスタンスが差し替わり、`LaunchedEffect` が古い State を持ち続けて反映されなくなる。**単一 State として保持**し、別 `LaunchedEffect` で current / size に合わせて補正する。
+
+#### 4.9.2 初回マウント時のみ `current` に追従 (P2-A)
+
+```kotlin
+var didInitialAlign by remember { mutableStateOf(false) }
+LaunchedEffect(sessions, current) {
+    if (!didInitialAlign && sessions.isNotEmpty()) {
+        val byCurrent = sessions.indexOfFirst { it.id == current }
+        if (byCurrent >= 0) index = byCurrent
+        didInitialAlign = true
+    }
+    // size 変化 clamp は常に走らせる
+    if (sessions.isEmpty()) index = 0
+    else if (index >= sessions.size) index = sessions.size - 1
+}
+```
+
+ユーザが session B にカーソルを動かしている最中に phone 側 `currentSessionId` が C に変わると (reply auto-switch、§3.2.1.3.1)、カーソルが勝手に C へジャンプする UI hazard があった。**FR-GL-20〜22 はカーソル位置の追従を要求していない** ので、初回マウント時のみ align してそれ以降はユーザ意志を尊重する。size 変化に対する clamp はユーザ意志を上書きしないので常に走らせる。
+
+### 4.10 構造化ログ
 
 ```kotlin
 object StructuredLog {
