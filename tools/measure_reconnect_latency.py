@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""
-NFR-10 SSE 再接続 latency 計測スクリプト (Phase 5、#188)。
-
-ConnectionController の backoff loop 出力から SSE 復旧時間を集計。docs/03 §3.2.4
-(connect_attempt / backoff / backoff_interrupted_by_reconnect)。
-
-復旧 1 件 = (切断検知 → 復旧成立) の time diff。判定ルール:
-  start = `channel.conn: event=connect_collect_threw`
-        (SSE collect が例外で落ちた瞬間。Hub kill / Wi-Fi OFF / 401 等)
-  end   = 次の `channel.conn: event=connect_attempt attempt=1`
-        または `channel.conn: event=backoff_interrupted_by_reconnect`
-        (= attempt が 1 にリセット = 直前の loop が成立し終わった証拠)
-
-合否: 中央値 (p50) < 30000ms で NFR-10 / AC-04 合格。
-
-実行例:
-    $ADB logcat -d | python3 tools/measure_reconnect_latency.py
-    python3 tools/measure_reconnect_latency.py /tmp/captured.log
-    python3 tools/measure_reconnect_latency.py --from-adb
-"""
+"""NFR-10 SSE 再接続 latency 計測 (docs/03 §7.5 / §7.5.1-.3, Phase 5)。"""
 
 from __future__ import annotations
 
@@ -64,7 +45,7 @@ def _percentile(values: list[float], p: float) -> float:
 
 
 def measure(lines: Iterable[str]) -> tuple[list[tuple[datetime, float]], list[str]]:
-    """(disconnect_ts, recovery_ms) のペア列を返す。orphan は warnings に集約。"""
+    """docs/03 §7.5.1 / §7.5.2: disconnect→recover pair 化、連続切断は orphan で記録。"""
     pending: datetime | None = None
     durations: list[tuple[datetime, float]] = []
     warnings: list[str] = []
@@ -81,7 +62,6 @@ def measure(lines: Iterable[str]) -> tuple[list[tuple[datetime, float]], list[st
         event = kv.get("event")
         if event == "connect_collect_threw":
             if pending is not None:
-                # 連続切断 (= 復旧前に再失敗) → orphan として記録、新規 pending に置き換える。
                 warnings.append(
                     f"unrecovered disconnect at {pending.time().isoformat()} "
                     f"(replaced by newer disconnect at {ts.time().isoformat()})"
@@ -92,7 +72,6 @@ def measure(lines: Iterable[str]) -> tuple[list[tuple[datetime, float]], list[st
                 continue
             attempt = kv.get("attempt")
             if attempt == "1":
-                # 直前の attempt が成功して loop が一度終わった = 復旧。
                 delta_ms = (ts - pending).total_seconds() * 1000
                 durations.append((pending, delta_ms))
                 pending = None
@@ -152,7 +131,12 @@ def _from_adb(serial: str | None) -> list[str]:
     if serial:
         cmd += ["-s", serial]
     cmd += ["logcat", "-d", "-s", "channel.conn:*"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        # docs/03 §7.2.4: adb 不在は exit 2 (env エラー扱い)。
+        print(f"adb not found: {adb} (set ADB env to absolute path)", file=sys.stderr)
+        sys.exit(2)
     if proc.returncode != 0:
         print(f"adb failed: {proc.stderr}", file=sys.stderr)
         sys.exit(2)

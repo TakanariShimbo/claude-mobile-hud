@@ -1,15 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    debug variant overlay: Phase 4 開発時の緩和。
-
-    - cleartextTrafficPermitted="true": Hub の plain HTTP (http://192.168.x.x:8788) に
-      接続するため必須。LAN/Tailscale 前提 (NFR-24 / OOS-05)。
-    - <certificates src="user" />: Charles / mitmproxy で TLS を覗くデバッグ用途を許容。
-      release では含めない (P2 of 371deaa review)。
-
-    Phase 5+ で Hub に TLS 終端を入れたら、本ファイル (debug overlay) は削除可能。
-    main の strict 設定だけで全 variant が動く。
--->
+<!-- docs/03 §9.6 / §9.6.2: debug overlay (cleartext + user CA)、Phase 5+ TLS 終端で削除可。 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>

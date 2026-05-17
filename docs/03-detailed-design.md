@@ -4381,7 +4381,133 @@ def verify(log_lines):
 
 **AC-09 判定**: 「Glass で permission 要求を 10 回連続再現」のシナリオを実機で実行 → logcat 取得 → ランナー実行 → 0 件で合格。
 
-### 7.3 wire parity CI
+#### 7.2.1 invariant の評価規則
+
+`tools/verify_atomicity.py` の実装は §7.2 の擬似コードを基に以下を強化する:
+
+- **優先順 (上から評価し最初に一致した mode で確定)**:
+  `listening` > `permission_confirming` > `confirming` > `idle` (§3.2.1.2.1)
+- mode が一致した時点で他の invariant は評価しない (`break`)。「一致 mode が 1 つに
+  絞られる」構造を維持することで、1 行に対して複数違反が同時に出ない
+- `idle` は predicate を常に true にして「分類できない line」も IDLE 扱いで pass
+- `permission_confirming` の predicate は `pending_request_id != "" && != "null"` で
+  null 文字列もはじく (StructuredLog が null を `"null"` で書く設計、§8.6.4)
+
+#### 7.2.2 値の大文字小文字 / quote 対応
+
+- mode / transcript_state / pending_request_id は `_norm()` で `lower()` 正規化する。
+  StructuredLog は小文字 (`mode=listening`) を書く設計だが、過去 / 将来の表記揺れ
+  (`LISTENING`) でも違反扱いにならない
+- `parse_kv_line` は `key="quoted value with spaces"` 形式に対応 (§8.6.3 escape 規約)。
+  `\"` / `\\` / `\n` / `\t` を元に戻す。空白入り value も dict に正しく取れる
+
+#### 7.2.3 入力経路 (3 通り)
+
+`--from-adb` で adb logcat 自走、第 1 引数で file path、stdin 直結も可:
+
+```
+$ADB logcat -d -s channel.glass:* channel.phone-state:* | python3 tools/verify_atomicity.py
+python3 tools/verify_atomicity.py /tmp/atomicity.log
+python3 tools/verify_atomicity.py --from-adb
+```
+
+- `--from-adb` は `subprocess.run(["adb", ...])` を呼ぶ。adb が PATH に無い開発機向けに
+  **`ADB` env variable でフルパス上書き可** (CLAUDE.md に従う、Ubuntu の開発環境)
+- `--serial` または `ANDROID_SERIAL` env で `-s <serial>` を adb に渡す
+- stdin が TTY ならヘルプを stderr に吐いて exit 2 (CI 誤呼び防止)
+
+#### 7.2.4 exit code 契約
+
+- `0` — 違反 0 件 (合格)
+- `1` — 違反検出 (FAIL 行を stderr ではなく stdout に並べる)
+- `2` — 引数 / 実行環境エラー (adb 不在、引数不足、TTY stdin)
+
+### 7.4 NFR-14 verdict latency 計測 (`tools/measure_verdict_latency.py`)
+
+`#187` で追加。Phase 5 で実機計測する verdict latency (NFR-14、ユーザがボタンを
+押してから verdict POST が成立して通知 cancel が走るまで) を logcat から集計する。
+
+```
+$ADB logcat -d | python3 tools/measure_verdict_latency.py
+python3 tools/measure_verdict_latency.py /tmp/captured.log
+python3 tools/measure_verdict_latency.py --from-adb
+```
+
+#### 7.4.1 start / end event のペア
+
+start (= ユーザがボタンを押した瞬間) は 2 経路を accept:
+
+- `channel.verdict: event=verdict_inproc request_id=X decision=Y` — Application-alive
+  経路 (in-process verdict、§3.8.X.X)
+- `channel.svc.verdict: event=verdict_dispatch_started request_id=X` — cold-start 経路
+  (`VerdictDispatchService` 起動経由、§3.8.4)
+
+end:
+
+- `channel.service: event=permission_canceled request_id=X notif_id=Z` — POST
+  `/permission` 成功 → 通知 cancel が走った瞬間
+
+`request_id` をキーに辞書で保持。同一 request_id の start が複数回見えても 1 件目を
+保持する (`starts.setdefault(req, ts)`、UI race 防御)。end が観測されなかった start は
+`warnings` に集約 (= "start without matching end")。
+
+#### 7.4.2 集計値と合否
+
+- `min` / `p50` / `p95` / `p99` / `max` / `avg` を msec で出力
+- top 5 slowest を `request_id` 付きで列挙
+- **合否**: `p99 < 5000ms` で AC-14 合格 (NFR-14 5s 予算)。違反した pair を全て
+  exit code 1 と共に列挙
+
+#### 7.4.3 logcat prefix の parse
+
+Android logcat の標準 prefix (`MM-DD HH:MM:SS.SSS PID TID LEVEL TAG:`) を 1 つの
+regex で取り、`datetime.strptime` で `%Y-%m-%d %H:%M:%S.%f` (年は 1970 fixed、差分
+計算には影響なし) に変換する。`_PREFIX_RE` で prefix match に失敗した行は skip
+(Python `print` や fatal traceback など key=value で無い行)。
+
+### 7.5 NFR-10 SSE 再接続 latency 計測 (`tools/measure_reconnect_latency.py`)
+
+`#188` で追加。`ConnectionController` の backoff loop ログから SSE 復旧時間を計測
+する (NFR-10 / AC-04、§3.2.4)。
+
+```
+$ADB logcat -d | python3 tools/measure_reconnect_latency.py
+python3 tools/measure_reconnect_latency.py /tmp/captured.log
+python3 tools/measure_reconnect_latency.py --from-adb
+```
+
+#### 7.5.1 disconnect → recover ペアの判定
+
+- **disconnect (start)**: `channel.conn: event=connect_collect_threw` — SSE collect
+  が例外で落ちた瞬間 (Hub kill / Wi-Fi OFF / 401 AuthFailed 等)
+- **recover (end)** は 2 種を accept:
+  - `channel.conn: event=connect_attempt attempt=1` — backoff loop が一巡して
+    attempt=1 にリセット (= 直前の attempt が成立)
+  - `channel.conn: event=backoff_interrupted_by_reconnect` — user による手動
+    reconnect 等で backoff を打ち切って即 attempt=1 (= 復旧成立として扱う)
+
+pending を `datetime | None` で 1 つだけ保持し、disconnect → recover を pair に
+畳む。
+
+#### 7.5.2 連続切断 (orphan) の扱い
+
+復旧前に 2 度目の `connect_collect_threw` が来た場合:
+
+- 既存 pending を `warnings` に "unrecovered disconnect at HH:MM:SS (replaced
+  by newer disconnect at HH:MM:SS)" として記録
+- pending を新しい disconnect 時刻に置き換え (= 古い切断は計測諦め、最新の切断から
+  pair を再開)
+
+最後まで recover が来なかった pending も同様に warnings に記録 (NFR-10 違反を
+データ抜けで隠さない)。
+
+#### 7.5.3 合否
+
+- 中央値 (`p50 < 30000ms`) で NFR-10 / AC-04 合格
+- p90 / p99 / max も併記するが、合否判定は p50 のみ (NFR-10 が「中央値」基準と
+  決めているため)
+
+### 7.6 wire parity CI
 
 ```yaml
 # .github/workflows/ci.yml (Phase 4 で作成)
@@ -4825,6 +4951,91 @@ preview` (preview は jsonl 1 行目から `message.content[0].text || content |
 - **Hub プロセスを自動 restart しない**: 現実行中の session を巻き込まないため。
   代わりに `pgrep -f hub/src/index.ts` で Hub 動作中なら user に restart を促すメッセージ
 - Phone Settings の token も再 pair が必要、と stderr で明示する
+
+### 9.4 Phone `AndroidManifest.xml` 詳細
+
+#### 9.4.1 FGS (Foreground Service) と targetApi 34
+
+Phone は 4 つの FGS を抱える:
+
+- `ChannelService` — `foregroundServiceType="dataSync"` (Hub↔Phone SSE / send)
+- `GlassConnectionService` — `dataSync` (Phone↔Glass CXR-L 維持)
+- `MicForegroundService` — `microphone` (Phone 側マイク fallback)
+- `VerdictDispatchService` — `dataSync` (kill 状態 verdict 送信、§3.8.4 / NFR-14)
+
+Android 14+ で FGS の type 別 permission が必須化されたため、以下を `tools:targetApi="34"`
+付きで declare (`minSdk=31` のため lint が無印で警告するので tools attribute で抑える):
+
+- `FOREGROUND_SERVICE_DATA_SYNC` (3 service 共通)
+- `FOREGROUND_SERVICE_MICROPHONE` (`MicForegroundService` 専用)
+
+`tools:targetApi="34"` は lint に「この permission は API 34+ 用 (`SDK_INT >= 34` で
+gate するから minSdk=31 でも欠落 warning は false-positive)」と明示する役割。ベースの
+`FOREGROUND_SERVICE` は全 API レベルで必要。
+
+#### 9.4.2 `<queries>` で CXR-L パッケージを明示公開
+
+Android 11+ の package visibility (targetSdk 30+) では `bindService` が暗黙に hidden
+package に届かない。`CXRLink.connect` は `Intent.setPackage("com.rokid.sprite.global.aiapp")`
+で CXR-L 同梱 app に bind するため、`<queries><package android:name=...>` で対象
+package を明示しないと `bindService` が silent fail する (Phase 4c1 review P1-1)。
+
+#### 9.4.3 `MainActivity` の launchMode と `windowSoftInputMode`
+
+- `singleTask` — 通知タップ / pair flow から戻る経路で onNewIntent を通すため
+  (§3.2 / FR-PH-33)
+- `adjustNothing|stateHidden`:
+  - `adjustNothing` は edge-to-edge レイアウト下で Android 15+ の `adjustResize`
+    強制を opt out するためのフラグ。これを付けないと system が window を縮め、
+    Compose 側で `imePadding()` が更に padding を足す = **二重補正で入力欄下に
+    余分な隙間が出る**バグになる
+  - `stateHidden` — 起動直後にキーボードを自動で開かない (Phone はチャット履歴表示が
+    既定状態、入力は user 起動)
+
+#### 9.4.4 `RECORD_AUDIO` / `BLUETOOTH_CONNECT`
+
+- `RECORD_AUDIO` — Phase 4b2 で追加。`MicCapture` が `AudioRecord` を開く際の
+  runtime permission base
+- `BLUETOOTH_CONNECT` — Phase 4c1 で追加。CXR-L 経路 (`BtAudioRouter`) で
+  Bluetooth SCO に切替えるための前提 permission
+
+### 9.5 Glass `AndroidManifest.xml` 詳細
+
+Glass app は minimal。`<application>` の `android:name` は default (`Application` を
+継承するクラスは未配置、初期化は `MainActivity.onCreate` 集約)。
+
+`uses-permission`:
+
+- `WAKE_LOCK` — `ScreenAwakeManager` が `SCREEN_BRIGHT_WAKE_LOCK` を acquire する
+  ため必須 (§4.X / Phase 5a review P1-A)。**未宣言だと `acquire()` 時点で
+  `SecurityException` が出て即 crash する** ので Phase 5a で追加した
+
+Glass 側に FGS は無い (CXR-L 同梱 app 側で接続維持、Phone 側で event を受けて UI を
+更新する設計)。
+
+### 9.6 `network_security_config.xml` の variant 分離 (main / debug)
+
+Phone は 2 つの `network_security_config.xml` を持ち、Gradle の variant overlay
+機構で release / debug を切替える:
+
+| variant | cleartext | trust-anchors | 用途 |
+|---|---|---|---|
+| **main** (release base) | `false` | `system` のみ | Phase 5+ で TLS 終端を入れた状態。MITM 緩和を含まない |
+| **debug** overlay | `true` | `system` + `user` | Phase 4 開発時。LAN/Tailscale 上の plain HTTP + Charles/mitmproxy 利用許可 |
+
+#### 9.6.1 cleartext を main で禁止する理由
+
+Phase 4 は LAN/Tailscale 上の plain HTTP 前提 (NFR-24 / OOS-05) だが、`assembleDebug`
+でしか app を実行しない方針なので main は最初から strict にする。Phase 5+ で Hub に
+TLS 終端 (Caddy / Tailscale Funnel 等) を入れた瞬間に追加の変更無しで release が
+通る (variant overlay を消すだけ)。
+
+#### 9.6.2 `<certificates src="user" />` を debug overlay に隔離する理由
+
+`user` trust-anchor (= ユーザインストール CA を信頼) は **MITM proxy で OpenAI /
+Hub の全 HTTPS を覗ける緩和**なので、release で誤って同梱しないために debug
+overlay にのみ置く (Phase 3 P2 of 371deaa review)。Phase 5+ で debug overlay を
+削除しても release 経路には残らない構造。
 
 ---
 

@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""
-NFR-14 verdict latency 計測スクリプト (Phase 5、#182 / #187)。
-
-start / end のペア:
-  start = `channel.verdict: event=verdict_inproc request_id=X decision=Y`
-        または `channel.svc.verdict: event=verdict_dispatch_started request_id=X`
-        (= ユーザがボタンを押した瞬間。Application-alive 経路と cold-start 経路の両方)
-  end   = `channel.service: event=permission_canceled request_id=X notif_id=Z`
-        (= verdict 完了で通知 cancel が走った瞬間。POST /permission 成功後の handler)
-
-集計値:
-  count / p50 / p95 / p99 / max
-  合否: p99 < 5000ms で AC-14 合格 (NFR-14 verdict 5s 予算)
-
-実行例:
-    $ADB logcat -d | python3 tools/measure_verdict_latency.py
-    python3 tools/measure_verdict_latency.py /tmp/captured.log
-    python3 tools/measure_verdict_latency.py --from-adb
-"""
+"""NFR-14 verdict latency 計測 (docs/03 §7.4 / §7.4.1-.3, Phase 5)。"""
 
 from __future__ import annotations
 
@@ -34,7 +16,7 @@ from datetime import datetime
 NFR14_BUDGET_MS = 5_000
 
 
-# Android logcat の prefix (`MM-DD HH:MM:SS.SSS PID TID LEVEL TAG:`) を parse。
+# docs/03 §7.4.3: logcat prefix の MM-DD HH:MM:SS.SSS PID TID LEVEL TAG: を parse。
 _PREFIX_RE = re.compile(
     r"^(?P<ts>\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})"
     r"\s+\d+\s+\d+\s+[VDIWE]\s+\S+:"
@@ -42,13 +24,12 @@ _PREFIX_RE = re.compile(
 
 _KV_RE = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)')
 
-# 開始 / 終了 event 名。前者は 2 経路 (inproc / dispatch_started) いずれも accept。
+# docs/03 §7.4.1: start は 2 経路 (inproc / dispatch_started)、end は permission_canceled。
 _START_EVENTS = {"verdict_inproc", "verdict_dispatch_started"}
 _END_EVENT = "permission_canceled"
 
 
 def _parse_ts(text: str) -> datetime | None:
-    # 年が無いので便宜上 1970 を入れる (差分計算には年は無関係)。
     try:
         return datetime.strptime(f"1970-{text}", "%Y-%m-%d %H:%M:%S.%f")
     except ValueError:
@@ -71,9 +52,8 @@ def _percentile(values: list[float], p: float) -> float:
 
 
 def measure(lines: Iterable[str]) -> tuple[list[tuple[str, float]], list[str]]:
-    """各 request_id について `start → end` のペアを取り、(request_id, ms) を返す。
-    対応する end が見つからなかった orphan 開始 event は warnings として返す。"""
-    starts: dict[str, datetime] = {}  # request_id → start datetime
+    """docs/03 §7.4.1: request_id をキーに start→end を pair 化。orphan は warnings。"""
+    starts: dict[str, datetime] = {}
     durations: list[tuple[str, float]] = []
     warnings: list[str] = []
 
@@ -91,12 +71,10 @@ def measure(lines: Iterable[str]) -> tuple[list[tuple[str, float]], list[str]]:
         if not event or not req:
             continue
         if event in _START_EVENTS:
-            # 既に同一 request_id の start があれば 1 件目を上書きしない (重複防御)。
             starts.setdefault(req, ts)
         elif event == _END_EVENT:
             start = starts.pop(req, None)
             if start is None:
-                # start が観測されない end (= 計測対象外、別経路で発火した cancel)。
                 continue
             delta_ms = (ts - start).total_seconds() * 1000
             durations.append((req, delta_ms))
@@ -145,7 +123,12 @@ def _from_adb(serial: str | None) -> list[str]:
     if serial:
         cmd += ["-s", serial]
     cmd += ["logcat", "-d"]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        # docs/03 §7.2.4: adb 不在は exit 2 (env エラー扱い)。
+        print(f"adb not found: {adb} (set ADB env to absolute path)", file=sys.stderr)
+        sys.exit(2)
     if proc.returncode != 0:
         print(f"adb failed: {proc.stderr}", file=sys.stderr)
         sys.exit(2)

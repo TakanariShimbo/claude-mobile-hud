@@ -1,17 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-    main (= release variant の base) では **strict**: cleartext は禁止、システム CA のみ信頼。
-    Phase 5+ で Hub に TLS 終端 (Caddy / Tailscale Funnel 等) を入れる前提の設定。
-
-    Phase 4 の開発時は debug variant の overlay (`phone/src/debug/res/xml/
-    network_security_config.xml`) が上書きして cleartext を許可する。
-    `assembleDebug` でしかこの app を実行しない方針 (NFR-24 / OOS-05 に従い、
-    Phase 4 は LAN/Tailscale 上の plain HTTP 前提だが、release 配布は Phase 5+ 待ち)。
-
-    P2 of 371deaa review:
-    - `<certificates src="user" />` (= ユーザインストール CA を信頼) は MITM proxy で
-      OpenAI / Hub 全 https を覗ける緩和なので main では含めない。debug overlay に隔離する。
--->
+<!-- docs/03 §9.6 / §9.6.1 / §9.6.2: main は strict (system CA / cleartext 禁止)、緩和は debug overlay 限定。 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>

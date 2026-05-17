@@ -7,7 +7,7 @@
 //     / Bridge↔Hub の wire と直接対応するわけではない。本テストはあくまで
 //     「JSON 構造として valid + snake_case 命名が両側で揃っている」smoke。
 //   - field 単位の semantic parity (`pending_permission.request_id` の存在等)
-//     を rigorous に押さえるのは Phase 5 §7.3 wire parity CI で zod schema 化
+//     を rigorous に押さえるのは Phase 5 §7.6 wire parity CI で zod schema 化
 //     とセットで実装する (本書 §10.4.2 引き継ぎ)。
 
 import fs from "node:fs";

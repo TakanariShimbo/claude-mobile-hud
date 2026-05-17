@@ -1,26 +1,5 @@
 #!/usr/bin/env python3
-"""
-NFR-13 atomicity 自動検証ランナー (Phase 3 §7.2 / AC-09)。
-
-実行例:
-    # 1) 実機で logcat 取得 → ファイル経由で verify
-    $ADB logcat -d -s channel.glass:* channel.phone-state:* > /tmp/atomicity.log
-    python3 tools/verify_atomicity.py /tmp/atomicity.log
-
-    # 2) stdin 直結 (実機が手元にある場合の手軽な経路)
-    $ADB logcat -d -s channel.glass:* channel.phone-state:* | python3 tools/verify_atomicity.py
-
-    # 3) adb 自走 (PATH に adb が通っている前提。ANDROID_SERIAL 指定可、
-    #    or env ADB でフルパス上書きも可)
-    python3 tools/verify_atomicity.py --from-adb
-
-exit code:
-    0 — 違反 0 件 (合格)
-    1 — 違反検出
-    2 — 引数 / 実行環境エラー
-
-invariant の優先順位は docs/03 §3.2.1.2.1 と §7.2 に従う。
-"""
+"""NFR-13 atomicity 自動検証ランナー (docs/03 §7.2 / §7.2.1-.4 / AC-09)。"""
 
 from __future__ import annotations
 
@@ -33,16 +12,11 @@ from collections.abc import Callable, Iterable
 from typing import TextIO
 
 
-# 大文字小文字を許容する (構造化ログ側は小文字を使う設計だが、過去 / 将来の表記揺れに耐性)。
 def _norm(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
-# 優先順位: docs/03 §3.2.1.2.1 ─
-#   LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE
-# 「mode が X を表示しているなら predicate が true である」べき、という invariant。
-# 1 行に対して上から順に評価し、最初に該当した mode の predicate が満たされなければ
-# 違反として記録する (一致 mode が 1 つに絞られる構造なので、複数違反は出ない)。
+# docs/03 §7.2 / §7.2.1: listening > permission_confirming > confirming > idle の優先順、最初に一致した mode で確定。
 INVARIANTS: list[tuple[str, Callable[[dict[str, str]], bool]]] = [
     ("listening", lambda e: _norm(e.get("transcript_state")) == "listening"),
     (
@@ -57,10 +31,8 @@ STATE_EVENTS = ("glass_state_swap", "phone_state_emit")
 
 
 def parse_kv_line(line: str) -> dict[str, str]:
-    """`event=X key1=v1 key2=v2 ...` を dict に。`key=v alue` のような空白入り値は
-    `"v alue"` で quote されている前提 (StructuredLog 側で escape 済み)。"""
+    """docs/03 §7.2.2: quoted value 対応の key=value 抽出。"""
     kv: dict[str, str] = {}
-    # `key=` の後ろは `"..."` か空白までの非空白列。
     for m in re.finditer(r'(\w+)=("(?:[^"\\]|\\.)*"|\S+)', line):
         k, raw = m.group(1), m.group(2)
         if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
@@ -111,15 +83,24 @@ def verify(lines: Iterable[str], *, stream: TextIO = sys.stdout) -> int:
 
 
 def _read_from_adb(serial: str | None) -> Iterable[str]:
-    # `ADB` env でフルパス上書き可 (CLAUDE.md 参照、PATH に adb 未登録の開発機向け)。
+    # docs/03 §7.2.3: `ADB` env でフルパス上書き可 (PATH に adb 未登録の開発機向け)。
     adb_bin = os.environ.get("ADB", "adb")
     cmd = [adb_bin]
     if serial:
         cmd += ["-s", serial]
     cmd += ["logcat", "-d", "-s", "channel.glass:*", "channel.phone-state:*"]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, check=False,
-    )
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError:
+        # docs/03 §7.2.4: adb 不在は exit 2 (env エラー扱い)。
+        print(
+            f"[verify_atomicity] adb not found: {adb_bin} "
+            f"(set ADB env to absolute path)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     if proc.returncode != 0:
         print(
             f"[verify_atomicity] adb failed (rc={proc.returncode}):\n{proc.stderr}",
@@ -139,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--from-adb",
         action="store_true",
-        help="adb logcat -d で自走 (PATH 通っていること)。",
+        help="adb logcat -d で自走 (adb は PATH or env ADB でフルパス指定)。",
     )
     parser.add_argument(
         "--serial",
