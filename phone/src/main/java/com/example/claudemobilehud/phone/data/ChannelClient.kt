@@ -34,17 +34,9 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Phone → Hub HTTP client。Phase 3 §3.2.2 / Phase 2 §4.3.1。
- *
- * - POST `/send`: text + 任意の image (base64)。chat_id を mint された応答を返す。
- * - POST `/permission`: verdict。`allow` / `deny`。410 で `PermissionGone`。
- * - GET `/events`: SSE。`SseEvent` を flow で配信。
- *
- * - HTTP 401 → `SharedWireError.Connection.AuthFailed`
- * - HTTP 410 → `SharedWireError.Permission.AlreadyVerdicted`
- * - HTTP 4xx 一般 → `SharedWireError.Connection.ServerError(code, bodyHead)`
- * - 4xx body の `error_code` が `image_too_large` → `PhoneWireError.Send.ImageTooLarge`
- * - 4xx body の `error_code` が `session_not_active` → `PhoneWireError.Send.SessionNotActive`
+ * Phone → Hub HTTP/SSE client (docs/03 §3.2.2)。401/410 ハンドリング (§3.2.2.1)、
+ * 4xx error_code マッピング (§3.2.2.2)、non-ASCII token の AuthFailed 翻訳 (§3.2.2.3)、
+ * callbackFlow UNLIMITED buffer (§3.2.2.4)、cancellation 取り扱い (§3.2.2.5) を参照。
  */
 open class ChannelClient(
     private val baseUrl: String,
@@ -93,11 +85,6 @@ open class ChannelClient(
         execute(request)
     }
 
-    /**
-     * `callbackFlow` の既定 buffer は RENDEZVOUS で trySend が collector 待ちの間に
-     * イベントを silent drop しうる。AD-13 の snapshot 連続 push (permission_snapshot
-     * 直後の outstanding 群を順次再 push) を取りこぼさないため、UNLIMITED buffer を挟む。
-     */
     open fun events(): Flow<SseEvent> = callbackFlow {
         val request = newRequest("events").get().build()
         val listener = object : EventSourceListener() {
@@ -138,6 +125,7 @@ open class ChannelClient(
         val source = EventSources.createFactory(httpClient).newEventSource(request, listener)
         awaitClose { source.cancel() }
     }
+        // docs/03 §3.2.2.4: UNLIMITED buffer で snapshot 連続 push を取りこぼさない。
         .buffer(capacity = Channel.UNLIMITED, onBufferOverflow = BufferOverflow.SUSPEND)
         .flowOn(Dispatchers.IO)
 
@@ -221,11 +209,7 @@ open class ChannelClient(
         val url = baseUrl.trimEnd('/') + "/" + path
         val builder = Request.Builder().url(url)
         if (token.isNotEmpty()) {
-            // OkHttp の Request.Builder.header は ASCII printable (0x20-0x7E) のみ受理。
-            // non-ASCII / 制御文字を含む token は IllegalArgumentException で死んで通常の
-            // Failed (再試行) 扱いになるため、ここで先に検出して AuthFailed に翻訳する。
-            // ユーザが Settings で意図せず日本語等を貼り付けた場合に「再ペアダイアログ」
-            // が表示される (= ConnectivityState.AuthFailed) UX 経路にのせる。
+            // docs/03 §3.2.2.3: OkHttp header は ASCII printable のみ受理。不正文字は AuthFailed に翻訳。
             for (c in token) {
                 val code = c.code
                 if (code < 0x20 || code > 0x7E) {
@@ -307,8 +291,6 @@ open class ChannelClient(
     }
 }
 
-// --- 例外化ユーティリティ (Logger 経由で wrap) ---
-
 class WireErrorException(val wireError: Any) : RuntimeException(messageOf(wireError))
 
 private fun messageOf(err: Any): String = when (err) {
@@ -323,9 +305,7 @@ private fun messageOf(err: Any): String = when (err) {
 fun SharedWireError.asException(): Throwable = WireErrorException(this)
 fun PhoneWireError.asException(): Throwable = WireErrorException(this)
 
-// --- OkHttp Call.await: callback → suspend ---
-// `suspendCancellableCoroutine` で coroutine cancel を `Call.cancel()` に伝播。
-// 結果として scope cancel 時に socket がリークしない。
+/** docs/03 §3.2.2.5: cancel を Call.cancel() に伝播して socket リークを防ぐ。 */
 private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
     enqueue(object : Callback {
         override fun onResponse(call: Call, response: Response) {
@@ -338,11 +318,7 @@ private suspend fun Call.await(): Response = suspendCancellableCoroutine { cont 
     cont.invokeOnCancellation { runCatching { this@await.cancel() } }
 }
 
-/**
- * `kotlin.runCatching` は `CancellationException` も catch する罠があるので、
- * suspending block の中で使う場合は専用版を介して cancellation を rethrow する。
- * Kotlin/kotlinx.coroutines#1814 で長らく議論されている既知の pitfall。
- */
+/** docs/03 §3.2.2.5: kotlin.runCatching は CancellationException を catch する罠を回避。 */
 private inline fun <T> coroutineRunCatching(block: () -> T): Result<T> = try {
     Result.success(block())
 } catch (c: CancellationException) {

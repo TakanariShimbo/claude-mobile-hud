@@ -713,6 +713,31 @@ fun events(): Flow<SseEvent> = callbackFlow {
 
 `SseEvent.AuthFailed` を受けた ConnectionController は再試行ループを停止する (§3.2.4)。
 
+##### 3.2.2.2 4xx error_code → `PhoneWireError` マッピング
+
+Hub は 4xx 応答 body に `{"error_code": "...", "message": "..."}` を載せる契約 (§5.2.1)。`ChannelClient` は次の対応で送信側エラーに変換する:
+
+| `error_code` | 変換先 | 用途 |
+|---|---|---|
+| `image_too_large` | `PhoneWireError.Send.ImageTooLarge` | UI Banner 表示 |
+| `session_not_active` | `PhoneWireError.Send.SessionNotActive` | session 切替誘導 |
+| その他 / parse 失敗 | `SharedWireError.Connection.ServerError(httpCode, bodyHead)` | bodyHead は先頭 200 文字 |
+
+§5.2.1 のサーバ側エラーコード表は現在 `image_too_large` のみを `PhoneWireError` 系に明示マップしているが、Phone 側は `session_not_active` も `PhoneWireError.Send.SessionNotActive` に翻訳する (上表が source of truth)。
+
+##### 3.2.2.3 non-ASCII token の `AuthFailed` 翻訳
+
+OkHttp の `Request.Builder.header` は **ASCII printable (0x20-0x7E) のみ受理** し、それ以外は `IllegalArgumentException` を投げる。token に日本語等を貼り付けた場合、通常の `Failed (再試行)` 扱いになると延々と backoff loop を回すだけで UX 上原因が分からない。`ChannelClient.newRequest` で送信前に文字コード検査し、不正文字を検出したら **`SharedWireError.Connection.AuthFailed` を throw** する。`ConnectionController` の `runConnectionLoop` catch block で `WireErrorException.wireError == AuthFailed` を検出して `ConnectivityState.AuthFailed` に遷移 → SettingsDialog 自動表示経路 (§3.2.4 末尾「重要規約」) に乗せる。
+
+##### 3.2.2.4 SSE `callbackFlow` の UNLIMITED buffer (AD-13 連動)
+
+`events()` は `callbackFlow` の戻り値を `.buffer(capacity = Channel.UNLIMITED, onBufferOverflow = SUSPEND)` でラップする。`callbackFlow` の既定 buffer は RENDEZVOUS で、collector が遅いと `trySend` が silent drop しうる。AD-13 の `permission_snapshot` 直後に outstanding 群を **1 件ずつ順次** push する経路 (FR-HU-14、`createdAtMs` 昇順) を取りこぼさないため、無制限 buffer を明示的に挟む。
+
+##### 3.2.2.5 cancellation 取り扱い
+
+- `coroutineRunCatching`: 通常の `kotlin.runCatching` は `CancellationException` も catch する (kotlinx.coroutines#1814 の既知 pitfall)。suspending block 内では catch しないラッパを使い、coroutine cancel を rethrow する
+- `Call.await` (OkHttp): `suspendCancellableCoroutine` で `invokeOnCancellation { call.cancel() }` を設定。scope cancel 時に socket を確実に閉じる
+
 #### 3.2.3 `SessionStore`
 
 ```kotlin
@@ -815,6 +840,52 @@ fun reconnect() {
 - AuthFailed では再試行ループを停止し、`reconnectTrigger` を待つ
 - 手動 `reconnect()` は `attempt=0` にリセット + AuthFailed フラグクリア + ループ再開
 - UI は `ConnectivityState.AuthFailed` を `LaunchedEffect(connectivity)` で検知 → SettingsDialog を自動表示
+
+##### 3.2.4.1 `HubAddress` 単位の再接続判定 (P2-6)
+
+`update(settings)` で loop を再起動する判定単位は **`HubAddress(baseUrl, token)` のペア** のみ。`openAiApiKey` 等の他フィールドが変わっても loop は再起動しない (transcription 側の責務)。`HubAddress == lastAddress` のときは早期 return で何もしない。
+
+##### 3.2.4.2 `cancelAndJoin` で旧 loop を待つ (P1-5)
+
+`update()` 内で `loopJob?.cancelAndJoin()` を呼ぶ。`cancel()` のみだと旧 loop の `client.events().collect` が cancel 完了する前に新 loop が起動し、`_status` / `_events` が新旧 2 つの emit 元から並行更新される race を踏む。`cancelAndJoin` で旧 loop の **完了** まで待ってから新 loop を `scope.launch` する。
+
+##### 3.2.4.3 backoff 中の手動 reconnect で即起床 (P1-6)
+
+`reconnectTrigger` は AuthFailed wait と Failed backoff delay の **両方** に効かせる。素朴に `delay(delayMs)` だと backoff 中の `reconnect()` 押下が次の loop 反復まで効かない。`select` で `onTimeout(delayMs)` と `reconnectTrigger.onReceive` を競合させ、`reconnect` が来たら **`attempt=0` リセット + 即再試行** に倒す:
+
+```kotlin
+val woken = select<Boolean> {
+    onTimeout(delayMs) { false }
+    reconnectTrigger.onReceive { true }
+}
+if (woken) { attempt = 0; log.info("backoff_interrupted_by_reconnect") }
+```
+
+##### 3.2.4.4 catch block での `AuthFailed` 翻訳経路
+
+`client.events().collect` 中の例外 (= `newRequest` の non-ASCII token 検査 throw、§3.2.2.3) は SSE 経路ではなく **同期 throw** で来る。catch block で `(e as? WireErrorException)?.wireError == SharedWireError.Connection.AuthFailed` を判定して `authFailed = true` に倒し、後段の `if (authFailed)` 分岐で `ConnectivityState.AuthFailed` に遷移する。
+
+##### 3.2.4.5 `_events` buffer policy
+
+`events: SharedFlow<SseEvent>` は `extraBufferCapacity = 64` + `BufferOverflow.DROP_OLDEST`。subscriber が遅くて満杯になったら最も古い event を捨てる。SSE event は再接続で snapshot から再 push される (§5 / FR-HU-14) ので、新しい状態を優先する DROP_OLDEST が妥当。
+
+##### 3.2.4.6 backoff 計算式
+
+```kotlin
+fun computeBackoffMs(attempt: Int, rng: Random = Random.Default): Long {
+    val shift = (attempt - 1).coerceIn(0, 5)
+    val baseMs = (1000L shl shift).coerceAtMost(30_000L)     // 1s → 32s 上限 30s
+    val jitterMs = (baseMs * rng.nextDouble(-0.25, 0.25)).toLong()
+    return (baseMs + jitterMs).coerceAtLeast(100L)
+}
+```
+
+- `attempt=1` → 1s ±25%
+- `attempt=2` → 2s ±25%
+- ... 倍々で増え、`attempt=5` で 16s、**`attempt=6` 以降で 30s 上限** (shift=5 で base が 32s に達し coerceAtMost で 30s に丸まる)
+- 最小 100ms (jitter 負方向で 0 に近づきすぎる事故を防ぐ)
+
+`rng` をパラメータ化することで unit test で deterministic に判定可能。
 
 #### 3.2.5 `InputController` + `TranscriptionClient`
 

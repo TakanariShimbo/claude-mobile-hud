@@ -30,18 +30,9 @@ import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 
 /**
- * Hub への SSE 接続を exp backoff で維持。Phase 3 §3.2.4。
- *
- * 状態:
- *   Idle  ←→ Connecting → Open
- *                |          |
- *                ↓          ↓
- *                Failed (再試行) ──→ AuthFailed (手動 reconnect 待ち)
- *
- * `update(Settings)` で **HubAddress (baseUrl+token)** が変わったら今のループを止めて
- * 再起動 (P2-6: openAiApiKey 等の他フィールドでは再起動しない)。
- * `reconnect()` は AuthFailed リセット + attempt=0 + ループ再起動 + **Failed backoff 中の
- * delay も即起床** (P1-6)。
+ * Hub への SSE 接続を exp backoff で維持する (docs/03 §3.2.4)。HubAddress 単位の判定 (§3.2.4.1)、
+ * cancelAndJoin 順序 (§3.2.4.2)、backoff 中の即起床 (§3.2.4.3)、AuthFailed 翻訳経路 (§3.2.4.4)、
+ * buffer policy (§3.2.4.5)、backoff 計算式 (§3.2.4.6) を参照。
  */
 class ConnectionController(
     parentContext: CoroutineContext = SupervisorJob() + kotlinx.coroutines.Dispatchers.Default,
@@ -71,16 +62,13 @@ class ConnectionController(
     private var loopJob: Job? = null
     private var lastAddress: HubAddress? = null
 
-    /**
-     * Settings 変更時に呼ぶ。HubAddress (baseUrl + token) が変わったときだけ loop 再起動。
-     * 旧 loop の完了を `cancelAndJoin` で待ってから新 loop を起動 (P1-5)。
-     */
     suspend fun update(settings: Settings) = mutex.withLock {
         val newAddress = if (settings.isConfigured) {
             HubAddress(settings.baseUrl, settings.token)
         } else null
         if (newAddress == lastAddress) return@withLock
         lastAddress = newAddress
+        // docs/03 §3.2.4.2: cancelAndJoin で旧 loop の完了を待ってから新 loop を起動。
         loopJob?.cancelAndJoin()
         if (newAddress == null) {
             _status.value = ConnectivityState.Idle
@@ -92,12 +80,10 @@ class ConnectionController(
         loopJob = scope.launch { runConnectionLoop(client) }
     }
 
-    /** 手動再接続。AuthFailed の wait も Failed の backoff delay も同時に起床。 */
     fun reconnect() {
         reconnectTrigger.trySend(Unit)
     }
 
-    /** scope を停止 (shutdown 時)。以後 update / reconnect は無効。 */
     fun close() {
         scope.cancel()
     }
@@ -129,10 +115,7 @@ class ConnectionController(
             } catch (e: Throwable) {
                 lastError = e.message
                 log.warn("connect_collect_threw", e)
-                // newRequest() の token validate などで AuthFailed.asException() が
-                // 投げられた場合は authFailed フラグを立てて AuthFailed 状態に遷移する。
-                // 例: non-ASCII token を Settings で保存したケース。再ペアダイアログ
-                // 表示まで通る (= ConnectivityState.AuthFailed)。
+                // docs/03 §3.2.4.4: newRequest の token 検査 throw を AuthFailed flag に翻訳。
                 val wire = (e as? WireErrorException)?.wireError
                 if (wire == SharedWireError.Connection.AuthFailed) authFailed = true
             }
@@ -152,8 +135,7 @@ class ConnectionController(
                 "${lastError ?: "disconnected"} / 再接続待ち #$attempt",
             )
             log.info("backoff", "attempt" to attempt, "delay_ms" to delayMs)
-            // P1-6: backoff delay 中の reconnect() で即起床する。
-            // select 経由なので、reconnect が来たら attempt をリセットして即再試行。
+            // docs/03 §3.2.4.3: backoff delay 中の reconnect() で即起床。
             val woken = select<Boolean> {
                 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
                 onTimeout(delayMs) { false }
@@ -166,11 +148,11 @@ class ConnectionController(
         }
     }
 
-    /** baseUrl + token のペア。再接続要否の判定単位 (P2-6)。 */
+    /** docs/03 §3.2.4.1: 再接続要否の判定単位。 */
     private data class HubAddress(val baseUrl: String, val token: String)
 
     companion object {
-        /** 1s → 30s capped exp backoff + ±25% jitter (Phase 3 §3.2.4)。 */
+        /** docs/03 §3.2.4.6: 1s → 30s capped exp backoff + ±25% jitter。 */
         fun computeBackoffMs(attempt: Int, rng: Random = Random.Default): Long {
             val shift = (attempt - 1).coerceIn(0, 5)
             val baseMs = (1000L shl shift).coerceAtMost(30_000L)
