@@ -27,18 +27,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * Repository を購読して CXR 経由でグラスへ wire event を流す。Phase 3 §3.4.1。
- *
- * **NFR-13 atomicity 射程** (AD-15):
- *   - `currentState` (mode + pending/transcript/input/micSource) は 1 wire で原子的に push
- *   - sessions / current_session / messages / notifications は eventual consistency
- *
- * **refresh()**: Glass hello を受けたとき呼ぶ。`refreshSignal` を bump し observer 群を
- * 再起動 → 各 StateFlow の現在値が distinctUntilChanged を貫通して再 emit される
- * (Glass プロセス再起動など phone 側 state 不変ケースの初期同期に必要)。
- *
- * **sender unavailable**: `GlassConnectionService.sender` が null の間は何も流さない。
- * Glass 接続が確立して non-null になると collectLatest が observer を起動する。
+ * Repository を購読して CXR 経由でグラスへ wire event を流す (docs/03 §3.4.1)。
+ * atomicity 射程は AD-15、refresh メカニズムは §3.4.1.1、notifications を refresh の
+ * 外側で起動する理由は §3.4.1.2、sender unavailable / 送信失敗の扱いは §3.4.1.3 を参照。
  */
 class GlassRelay(
     private val repository: ChannelRepository,
@@ -55,8 +46,6 @@ class GlassRelay(
             GlassConnectionService.sender.collectLatest { sender ->
                 if (sender == null) return@collectLatest
                 log.info("glass_relay_sender_attached")
-                // 通知 (一過性 event) は refresh で取り直しできないため refreshSignal の
-                // re-entrant cancel scope の外側で 1 度だけ起動。
                 launch { observeNotifications(sender) }
                 refreshSignal.collectLatest {
                     coroutineScope {
@@ -70,10 +59,8 @@ class GlassRelay(
         }
     }
 
-    /** Glass hello で trigger。observer 群を再起動して現在値を再送。 */
     fun refresh() {
         log.info("glass_relay_refresh")
-        // P2-7: 並行 refresh 呼び出しで read-modify-write が衝突しないように update を使う。
         refreshSignal.update { it + 1 }
     }
 
@@ -82,24 +69,13 @@ class GlassRelay(
         collectorJob = null
     }
 
-    // --- 個別 observer ---
-
     private suspend fun observeCurrentState(sender: (ByteArray) -> Unit) {
-        // currentState は Repository が seq を採番して 1 emit に 1 値を保証している (P1-7)。
         repository.currentState.collect { cs ->
             sendWire(sender, cs)
         }
     }
 
     private suspend fun observeSessionList(sender: (ByteArray) -> Unit) {
-        // FR-GL-20: Glass の session 一覧は **アクティブな session のみ** 表示する。
-        // Phone 側 SessionDrawer (`ui.sessions`) は履歴アクセスも兼ねるため
-        // inactive を含めて出すが、Glass は「いま操作できる session」だけを示すので
-        // ここで filter する。
-        // 注意: `current_session` wire (observeCurrentSession) は filter しないので、
-        // current が inactive 化したケースでは「list に居ない session が current」に
-        // なり得る。Glass UI 側は indexOfFirst で `-1` ガード済みなのでクラッシュは
-        // しないが、§3.4.1 の補注も参照。
         repository.uiState
             .map { state -> state.sessionListForWire() }
             .distinctUntilChanged()
@@ -137,7 +113,7 @@ class GlassRelay(
         repository.events.collect { event ->
             when (event) {
                 is ChannelEvent.Reply -> {
-                    // 本文は HUD overlay に乗せない (ユーザ要望)。kind + sessionId のみ。
+                    // HUD overlay には本文を乗せない (ユーザ要望)。kind + sessionId のみ。
                     sendWire(
                         sender,
                         NotificationEvent(
@@ -160,15 +136,11 @@ class GlassRelay(
                         ),
                     )
                 }
-                is ChannelEvent.Sent -> Unit // glass HUD 表示不要
+                is ChannelEvent.Sent -> Unit
             }
         }
     }
 
-    /**
-     * P2-8: encode 失敗時は警告のみ (UI に出すレベルではなく開発時 bug)。`ts` を含めて
-     * logcat で重複検出しやすくする。send 失敗は CXR 一時障害なのでログ詳細を増やす。
-     */
     private inline fun sendWire(sender: (ByteArray) -> Unit, event: WireEvent) {
         val payload = runCatching { codec.encode(event) }
             .onFailure {
@@ -193,9 +165,8 @@ class GlassRelay(
 
 }
 
-// --- payload mapper (protocol.MessageRole は phone.data.model から直接再 export 済) ---
-// internal にして `phone/src/test` から見えるようにする。GlassRelayMappingTest が
-// PhoneUiState の transformation を assert する (#179)。
+// `phone/src/test` から見えるよう internal。GlassRelayMappingTest が PhoneUiState の
+// transformation を assert する (#179)。
 
 internal fun com.example.claudemobilehud.phone.data.model.SessionSummary.toWirePayload(): SessionSummaryPayload =
     SessionSummaryPayload(
@@ -212,18 +183,10 @@ internal fun com.example.claudemobilehud.phone.data.model.ChatMessage.toWirePayl
         chatId = chatId,
     )
 
-/**
- * `PhoneUiState` から Glass `SessionList.sessions` payload を導出。
- * FR-GL-20: active のみ。`observeSessionList` が `.map { it.sessionListForWire() }`
- * で使う。test (`GlassRelayMappingTest`) が直接呼ぶ。
- */
+/** docs/03 §3.4.1 FR-GL-20: Glass の session 一覧は active のみ。 */
 internal fun PhoneUiState.sessionListForWire(): List<SessionSummaryPayload> =
     sessions.filter { it.isActive }.map { it.toWirePayload() }
 
-/**
- * `PhoneUiState` から Glass `MessagesEvent` payload を導出。
- * 戻り値は (sessionId, messages) のペア。Glass UI は current session の
- * messages のみ描画するため currentSessionId と一緒に渡す。
- */
+/** (currentSessionId, current messages) を 1 ペアにして distinctUntilChanged を効かせる。 */
 internal fun PhoneUiState.messagesForWire(): Pair<String?, List<ChatMessagePayload>> =
     currentSessionId to messages.map { it.toWirePayload() }
