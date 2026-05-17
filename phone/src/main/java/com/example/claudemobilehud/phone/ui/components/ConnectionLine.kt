@@ -15,9 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.claudemobilehud.phone.data.model.ConnectivityState
 
-/**
- * TopBar 下の接続状態 1 行表示。色 + 短いラベル。
- */
+/** docs/03 §3.5.1.12: 5 状態を色 + label で 1 行表示。AuthFailed は Failed と同色 (error)。 */
 @Composable
 fun ConnectionLine(status: ConnectivityState) {
     val (label, color) = when (status) {

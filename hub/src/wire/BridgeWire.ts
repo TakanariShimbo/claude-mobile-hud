@@ -1,5 +1,5 @@
-// Hub ↔ Bridge の TCP NDJSON wire 型。Phase 2 §4.3.2 / Phase 3 §5.1。
-// Bridge は接続後最初に `register` を送る。以後双方向に NDJSON (1 行 1 JSON)。
+// docs/02 §4.3.2 / docs/03 §5.1: Hub ↔ Bridge TCP NDJSON wire 型。
+// Bridge は接続後最初に `register` を送る (§6.2.2.2 register-then-queue)。
 
 // --- Bridge → Hub ---
 
@@ -48,9 +48,9 @@ export type SendMessage = {
     type: "send";
     chat_id: string;
     text: string;
-    /** Phone から受け取った画像の base64 (data: prefix なし)。Bridge 側で staging される。 */
+    /** docs/03 §6.2.4: Phone 由来 base64 画像 (data: prefix なし)、Bridge が staging。 */
     image_base64?: string;
-    /** image_base64 と組で渡る MIME (例: "image/jpeg")。 */
+    /** docs/03 §6.2.4.3: MIME whitelist (image/jpeg|png|webp|gif)。 */
     image_mime?: string;
 };
 

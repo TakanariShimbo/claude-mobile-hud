@@ -1,5 +1,5 @@
-// Phone ↔ Hub の HTTP/JSON wire 型。Phase 2 §4.3.1 / Phase 3 §5.4。
-// snake_case を維持 (Kotlin :protocol の golden と parity を取れる shape)。
+// docs/02 §4.3.1 / docs/03 §5.4: Phone ↔ Hub HTTP/JSON wire 型。
+// snake_case 維持 — Kotlin :protocol golden と parity (§2.6 双方向検証)。
 
 // --- Phone → Hub (HTTP POST) ---
 
@@ -75,10 +75,7 @@ export type PhoneSseEvent =
 
 export type PhoneSseEventType = PhoneSseEvent["type"];
 
-/**
- * OutstandingEntry → PermissionSse の純粋変換。state class が型変換責務を持たないよう
- * ここに置く。session_id が null なら key 自体を省略 (`exactOptionalPropertyTypes` 準拠)。
- */
+/** docs/03 §5.2.3 / §5.2.4: state class に型変換責務を持たせない純粋変換。session_id null は key 省略 (exactOptionalPropertyTypes)。 */
 export function permissionEntryToSse(entry: {
     requestId: string;
     sessionId: string | null;

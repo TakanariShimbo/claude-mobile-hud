@@ -2316,6 +2316,46 @@ null を返す。decode 失敗 (file が消えた、format 不正) は `runCatch
 null。caller (`InputBar` の attach chip など) は null で「画像プレビュー無し」UI を
 出す契約。
 
+##### 3.5.1.11 `MessageList` + `MessageRow` (displayText fallback)
+
+会話メッセージ一覧の Compose composable。AD-18 (§3.5.3) で **`messages:
+List<ChatMessage>` だけ受け取る**: 他フィールド変化で recompose されないよう
+state を絞る + `LazyColumn(key = { it.id })` で item diff を最小化する。
+
+**自動末尾スクロール**: `LaunchedEffect(messages.size)` で `state.animateScrollToItem(
+messages.size - 1)`。最新メッセージ追加で末尾に追従。
+
+**P3-D 4c2 review: displayText の 3 段 fallback**: `MessageRow` の中身は bubble
+描画判断を以下の優先順位で:
+
+| 条件 | 描画 |
+|---|---|
+| `text.isNotBlank()` | 通常の text bubble |
+| `image != null && bitmap == null` | `"(画像)"` テキスト fallback |
+| それ以外 (text 空 + image 無し / bitmap 描画済) | bubble を出さない (空白) |
+
+旧条件 `text.isNotBlank() || image == null` だと「text 空 + image 無し」で空 bubble
+に `"(画像)"` だけ出るバグがあった (image を消した古い msg / SYSTEM 系の空 text)。
+**画像 path はあるが bitmap load 失敗時** にはユーザに「(画像)」と何かを見せる目的で
+fallback 1 つだけ残す。
+
+##### 3.5.1.12 `ConnectionLine` (TopBar 下の 1 行 status)
+
+`ConnectivityState` を色 + 短いラベルの 1 行に映す。`Idle / Connecting / Open /
+Failed(reason) / AuthFailed` の 5 状態に対応:
+
+| 状態 | label | colorScheme |
+|---|---|---|
+| `Idle` | 未設定 | outline |
+| `Connecting` | 接続中... | tertiary |
+| `Open` | 接続済み | primary |
+| `Failed(reason)` | 失敗: {reason} | error |
+| `AuthFailed` | token 無効 | error |
+
+8 dp の色付き丸 + label を Row で並べる minimal な status indicator。`AuthFailed` を
+`Failed` と別色 / 別 label にしないのは設計判断 (どちらも attention を引きたいので
+error 色で揃える、対応は §3.6.5.5 で UI gate される)。
+
 #### 3.5.2 `ChatViewModel`
 
 ```kotlin

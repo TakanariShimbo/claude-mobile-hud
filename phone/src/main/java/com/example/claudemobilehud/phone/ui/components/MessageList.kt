@@ -30,12 +30,7 @@ import com.example.claudemobilehud.phone.data.model.ChatMessage
 import com.example.claudemobilehud.phone.ui.util.rememberImageBitmapFromPath
 import com.example.claudemobilehud.protocol.MessageRole
 
-/**
- * 会話メッセージ一覧。最新が下に追加されると自動で末尾までスクロールする。
- * AD-18 (Compose recomposition 戦略): `messages: List<ChatMessage>` だけを受け取り
- * その他のフィールド変化で recompose されない (`LazyColumn` が `key = { it.id }` で
- * item diff を最小化)。
- */
+/** docs/03 §3.5.1.11: messages のみ受け取り (AD-18) / LazyColumn key で item diff 最小化 / size 変化で自動末尾スクロール。 */
 @Composable
 fun MessageList(messages: List<ChatMessage>, modifier: Modifier = Modifier) {
     val state = rememberLazyListState()
@@ -91,12 +86,7 @@ private fun MessageRow(message: ChatMessage) {
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
             )
         }
-        // P3-D of 4c2 review:
-        //  - 旧 `text.isNotBlank() || image == null` だと「text 空 + image 無し」
-        //    で空 bubble に "(画像)" だけ出て見える (image を消した古い msg や
-        //    SYSTEM 系の空 text などで実際に発生)。
-        //  - 画像の bitmap load 失敗時もユーザに何か見せたいので、image があるが
-        //    bitmap が null の場合だけ "(画像)" フォールバックを出す。
+        // docs/03 §3.5.1.11: displayText 3 段 fallback (P3-D) — bitmap null かつ image あり時のみ "(画像)"。
         val bitmap = message.image?.let { rememberImageBitmapFromPath(it.localPath) }
         if (bitmap != null) {
             Image(

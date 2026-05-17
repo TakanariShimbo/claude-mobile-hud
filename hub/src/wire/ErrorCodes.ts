@@ -1,5 +1,5 @@
-// Hub → Phone HTTP error_code (Phase 3 §5.2.1 / AD-21)。
-// Phone 側 PhoneWireError へのマッピングは Phone 実装時に行う。
+// docs/03 §5.2.1 / AD-21: Hub → Phone HTTP error_code 体系。
+// Phone 側 PhoneWireError マッピングは §3.7 参照。
 
 export const ERROR_CODES = {
     AUTH_FAILED: "auth_failed",
