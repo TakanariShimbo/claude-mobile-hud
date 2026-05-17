@@ -10,15 +10,33 @@ shift || true
 
 case "$CMD" in
     hub)
-        cd "$ROOT/hub"
-        # Phase 4: tsx でデーモン起動
-        echo "[claude-mobile-hud] hub: not yet implemented (Phase 4)" >&2
-        exit 1
+        # Hub daemon を起動。`hub/package.json` の `start` script (`tsx --env-file-if-exists=.env
+        # src/index.ts`) を foreground で exec する。--env-file-if-exists により hub/.env が
+        # 無いリポジトリ初期セットアップ時でもエラーにならず default で起動できる。
+        if [[ ! -d "$ROOT/hub/node_modules" ]]; then
+            echo "hub/node_modules not found. Run 'npm --prefix hub ci' first." >&2
+            exit 1
+        fi
+        exec npm --prefix "$ROOT/hub" start --silent -- "$@"
         ;;
     pair)
-        # Phase 4: QR を端末に表示
-        echo "[claude-mobile-hud] pair: not yet implemented (Phase 4)" >&2
-        exit 1
+        # Phone とのペアリング QR を表示。`pair lan` = LAN 経由 (host IPv4 を auto-detect)、
+        # `pair ts` = Tailscale 経由 (`ts.net` の 100.x address)。引数なしは `lan` 既定。
+        # 実装は hub/src/pair.ts (Phase 3 §5)。
+        MODE="${1:-lan}"
+        shift || true
+        case "$MODE" in
+            lan|ts) ;;
+            *)
+                echo "Usage: claude-mobile-hud pair <lan|ts>" >&2
+                exit 1
+                ;;
+        esac
+        if [[ ! -d "$ROOT/hub/node_modules" ]]; then
+            echo "hub/node_modules not found. Run 'npm --prefix hub ci' first." >&2
+            exit 1
+        fi
+        exec npm --prefix "$ROOT/hub" run --silent "pair:$MODE" -- "$@"
         ;;
     run)
         # Claude Code セッションを起動 (safe / yolo モード)。POC `claude-channel run` の移植。
