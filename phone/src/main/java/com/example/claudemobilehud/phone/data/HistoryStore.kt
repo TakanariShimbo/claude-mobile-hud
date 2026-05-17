@@ -17,15 +17,10 @@ import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
 /**
- * Phone-local 会話履歴の永続化。Phase 3 §3.6.1 / AD-17 / NFR-13。
+ * Phone-local 会話履歴の永続化 (docs/03 §3.6.1 / AD-17 / NFR-13)。serializer + 順序保持
+ * (§3.6.1.1)、load の段階的 recovery (§3.6.1.2)、save の atomic move 失敗パス (§3.6.1.3) を参照。
  *
- * - JSON 単一ファイル `chat-history.json` (200 MB cap)
- * - 保存は **atomic write**: `.tmp` に書いてから `Files.move(ATOMIC_MOVE, REPLACE_EXISTING)`
- * - 起動時に `.tmp` のみ残っていれば前回 crash と判定して target にリネーム
- * - JSON parse 失敗時はバックアップ (`*.corrupt.<ms>`) してから空で再開
- * - すべての操作は `Mutex` 配下 + IO dispatcher
- *
- * `filesDir` だけ受ければよく Context 自体は必要ない (Robolectric なしで JVM テスト可能)。
+ * Context 自体は不要 (filesDir だけ受ければ Robolectric なしで JVM テスト可能)。
  */
 class HistoryStore(private val filesDir: File) {
 
@@ -44,14 +39,8 @@ class HistoryStore(private val filesDir: File) {
         encodeDefaults = true
     }
 
-    /**
-     * 履歴を読み込む。
-     * - `.tmp` のみ残っていれば前回 crash → tmp を target にリネーム
-     * - target 破損時はバックアップ + 空 map
-     */
     suspend fun load(): MutableMap<String, MutableList<ChatMessage>> = mutex.withLock {
         withContext(Dispatchers.IO) {
-            // 親 dir が存在しないテスト/初回起動でも load が落ちないように。
             filesDir.mkdirs()
             recoverIfTmpOrphaned()
 
@@ -79,10 +68,6 @@ class HistoryStore(private val filesDir: File) {
         }
     }
 
-    /**
-     * 履歴を atomic に書き出す。失敗時 (異 filesystem etc) は `.tmp` を残してログのみ。
-     * 次回 [load] で復旧チャンス。
-     */
     suspend fun save(snapshot: Map<String, List<ChatMessage>>) = mutex.withLock {
         withContext(Dispatchers.IO) {
             val text = json.encodeToString(serializer, snapshot)
@@ -102,7 +87,7 @@ class HistoryStore(private val filesDir: File) {
                 )
                 log.debug("history_saved", "sessions" to snapshot.size)
             } catch (e: AtomicMoveNotSupportedException) {
-                // 異 filesystem 跨ぎ等。tmp を残して次回 load で復旧 (target が古ければ tmp 採用)。
+                // docs/03 §3.6.1.3: tmp を残して次回 load の recoverIfTmpOrphaned で復旧。
                 log.error("history_atomic_move_unsupported", e)
             } catch (e: IOException) {
                 log.error("history_move_failed", e)
@@ -110,10 +95,6 @@ class HistoryStore(private val filesDir: File) {
         }
     }
 
-    /**
-     * `.tmp` のみ残っていれば前回 crash 直後と判断して target に rename して引き継ぐ。
-     * target が新しければ tmp は破棄。
-     */
     private fun recoverIfTmpOrphaned() {
         if (!tmpFile.exists()) return
         if (!targetFile.exists()) {
@@ -127,13 +108,11 @@ class HistoryStore(private val filesDir: File) {
             log.info("history_recovered_from_tmp", "ok" to ok)
             return
         }
-        // target も tmp も両方ある: 通常 atomic move 中に crash なら tmp は消えているはず。
-        // tmp のほうが新しいなら一旦バックアップしてから rename、古ければ破棄。
+        // docs/03 §3.6.1.2: 両方ある場合は lastModified 比較で新しい方を採用。
         if (tmpFile.lastModified() > targetFile.lastModified()) {
             val backup = File(filesDir, "$FILE_NAME.bak.${System.currentTimeMillis()}")
             runCatching { targetFile.renameTo(backup) }
-            // P2-8: backup rename が失敗しても target が残っているケースに備えて
-            // REPLACE_EXISTING を付ける (save 側と統一)。
+            // P2-8: backup rename が失敗しても target が残るケースに備え REPLACE_EXISTING。
             val ok = runCatching {
                 Files.move(
                     tmpFile.toPath(),

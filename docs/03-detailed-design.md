@@ -1396,6 +1396,14 @@ PendingIntent は `FLAG_IMMUTABLE` 必須。
 <!-- 3 つの FGS が共有。Play Store 審査用に「Hub との通信維持 + Glass との通信維持 + permission verdict 送出」と用途明示 -->
 ```
 
+##### 3.3.5.4 実装上の不変条件
+
+- **専用 OkHttpClient (callTimeout=4s)**: `ChannelClient.defaultClient()` は SSE 用に `readTimeout=0` なので、verdict 送信には `callTimeout=4s` / `connectTimeout=2s` の **別 OkHttpClient を都度建てる**。LAN/Tailscale 不通時の deadlock を 4s で打ち切ることで NFR-14 (5s) 予算内に収める
+- **二度叩き対策**: 同一 PendingIntent で `onStartCommand` が複数回呼ばれる theoretical race を、`inflight?.cancelAndJoin()` を `runBlocking { withContext(NonCancellable) { ... } }` で待ってから新 launch する形で潰す (Service main thread を ms オーダー block するだけで ANR には至らない)
+- **`parseDecision` の防御 (P3-6)**: 設計書は `PermissionDecision.valueOf(behaviorStr)` を呼ぶ snippet だが、本実装は **例外を起こさない `when` 比較**に置き換える。`Receiver` が enum 名以外を渡す経路は理論上ないが、verdict 経路は extras 破損で crash させたくない (kill 中の通知応答 = ユーザの唯一の操作経路)
+- **missing extras の早期 stop**: `requestId` / `behavior` / `baseUrl` / `token` のいずれかが blank なら warn log + `stopForeground(STOP_FOREGROUND_REMOVE)` + `stopSelf()` で即終了
+- **`AuthFailed` 時の通知文言書き換え hook**: 現状は warn log のみ。「再ペアが必要」への文言書き換えは 4c+ で `updateNotificationForAuthFail` を実装する設計 (§3.7 と整合)
+
 #### 3.3.6 `PhoneApplication` (bootstrap / 手動 DI)
 
 `Application` サブクラス。Hilt は本プロジェクト範囲では入れず **手動 DI コンテナ** (`AppContainer`) を `onCreate` で組み立てる。
@@ -1752,6 +1760,39 @@ suspend fun load(): MutableMap<String, MutableList<ChatMessage>> = mutex.withLoc
 - `AppLifecycleController.shutdownAll(context)` 内で `repository.flushHistory()` を呼ぶ
 - 500ms debounce job をキャンセルして即時 save 実行
 - ExitDialog の確定ボタンも `shutdownAll → Activity.finishAndRemoveTask()` の順で呼ぶ
+
+##### 3.6.1.1 serializer + 順序保持
+
+```kotlin
+private val serializer = MapSerializer(
+    String.serializer(),
+    ListSerializer(ChatMessage.serializer()),
+)
+```
+
+`load` の戻り値は `LinkedHashMap` に変換することで **session 順序を JSON ファイル上の順序のまま保持** する (`mapValuesTo(LinkedHashMap()) { ... }`)。SessionStore 側はこの順序を SessionDrawer の表示順に流用する。
+
+##### 3.6.1.2 `load` の壊れた状態の段階的 recovery
+
+`load()` 冒頭で次の優先順位で処理:
+
+1. **`filesDir.mkdirs()`** — 初回起動 / Robolectric 環境でも親 dir 不在で落ちないよう先に作成
+2. **`recoverIfTmpOrphaned()`** — `.tmp` のみ残っていれば前回 crash と判定して target にリネーム。target も tmp も両方ある場合は `lastModified()` 比較で新しい方を採用 (古い方は `*.bak.<ms>` にバックアップ、P2-8 で `REPLACE_EXISTING` を付ける)
+3. **`targetFile.exists()` false** → 空 map
+4. **`readText()` `IOException`** → error log + 空 map
+5. **`raw.isBlank()`** → 空 map (truncated write などの fallback)
+6. **JSON parse 失敗** → 当該 file を `*.corrupt.<ms>` にバックアップ + 空 map で再開
+
+すべての fail-safe で空 map に倒すことで、UI が `load` 後にクラッシュしない契約を満たす。
+
+##### 3.6.1.3 `save` の atomic move 失敗パス
+
+`Files.move(ATOMIC_MOVE, REPLACE_EXISTING)` が `AtomicMoveNotSupportedException` (異 filesystem 跨ぎ等) または `IOException` を投げた場合、**`.tmp` は削除しない**。次回 `load()` の `recoverIfTmpOrphaned` で:
+
+- target が古い (or 不在) なら tmp を promote
+- target が新しいなら tmp を破棄
+
+ことで save の eventual consistency を担保する。
 
 #### 3.6.2 設定 DataStore
 

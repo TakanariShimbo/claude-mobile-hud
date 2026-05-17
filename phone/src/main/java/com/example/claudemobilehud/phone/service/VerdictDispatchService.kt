@@ -25,20 +25,10 @@ import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 
 /**
- * Phase 3 §3.3.5 / AD-16 の短命 FGS-dataSync。
- *
- * アプリプロセス kill 中に通知シェードから verdict (Allow/Deny) が来た時、
- * `PermissionActionReceiver` がこの Service を `startForegroundService` する。
- * 本サービスは:
- *   1. すぐに startForeground (dataSync 通知) で OS 起動制限を満たす
- *   2. extras から baseUrl / token / requestId / behavior を取り出す
- *   3. fresh `ChannelClient` で POST /permission
- *   4. 完了したら通知 cancel + stopSelf
- *
- * NFR-14 (5s 以内) の予算は設計書 §3.3.5.1。
- *
- * **生存 scope**: Service 自身の lifetime に紐づく `serviceScope`。stopSelf 前に
- * 既存 launch が走り続けるが、Service 死で scope.cancel() される。
+ * 短命 FGS-dataSync (docs/03 §3.3.5 / AD-16)。kill 中の通知シェード verdict 経路。
+ * NFR-14 (5s) 予算 (§3.3.5.1)、PendingIntent extras (§3.3.5.2)、実装上の不変条件
+ * (§3.3.5.4: callTimeout=4s 別 OkHttpClient / 二度叩き cancelAndJoin / parseDecision 防御 /
+ * missing extras 早期 stop / AuthFailed log-only) を参照。
  */
 class VerdictDispatchService : Service() {
     private val log = StructuredLog("channel.verdict")
@@ -80,25 +70,19 @@ class VerdictDispatchService : Service() {
             return START_NOT_STICKY
         }
 
-        // 同一 PendingIntent で 2 回叩かれた場合 (theoretical) は既存 inflight を join cancel
-        // してから新 launch を走らせる。stopForeground/stopSelf の finally race を避ける。
-        // runBlocking は Service の main thread を 1 tick だけ block するが、cancel 直後の
-        // finally 完了まで (ms オーダー) なので ANR には至らない。
+        // docs/03 §3.3.5.4: 同一 PendingIntent 二度叩きの finally race を防ぐ。
         inflight?.let { prev ->
             runBlocking { withContext(NonCancellable) { prev.cancelAndJoin() } }
         }
         inflight = serviceScope.launch {
             try {
-                // §3.3.5.1 NFR-14 5s 予算: callTimeout=4s で LAN/Tailscale 不通時の deadlock を回避。
-                // SSE 用 defaultClient は readTimeout=0 のため別 OkHttpClient を建てる。
+                // docs/03 §3.3.5.4: SSE 用 defaultClient (readTimeout=0) ではなく callTimeout=4s の専用 client。
                 val http = OkHttpClient.Builder()
                     .callTimeout(4, TimeUnit.SECONDS)
                     .connectTimeout(2, TimeUnit.SECONDS)
                     .build()
                 val client = ChannelClient(baseUrl, token, http)
-                // P3-6: 設計書は PermissionDecision.valueOf() を呼ぶ snippet だが本実装は
-                // 例外を起こさない when 比較に変更。verdict 経路は extras が破損していても
-                // crash させたくないため (Receiver が enum 名以外を入れる経路は理論上無いが防御)。
+                // docs/03 §3.3.5.4 (P3-6): valueOf を避けて when で防御。
                 val decision = parseDecision(behaviorStr)
                 if (decision == null) {
                     log.warn("verdict_dispatch_bad_behavior", "behavior" to behaviorStr)
@@ -114,8 +98,8 @@ class VerdictDispatchService : Service() {
                         log.info("verdict_dispatch_ok", "request_id" to requestId)
                     }
                     wire is SharedWireError.Connection.AuthFailed -> {
+                        // docs/03 §3.3.5.4: 4c+ で通知文言書き換え hook 実装予定。現状は log のみ。
                         log.warn("verdict_dispatch_auth_failed", "request_id" to requestId)
-                        // UI で扱えないため通知文言を「再ペアが必要」に書き換える hook は 4c で実装 (§3.7)。
                     }
                     else -> {
                         log.warn(
