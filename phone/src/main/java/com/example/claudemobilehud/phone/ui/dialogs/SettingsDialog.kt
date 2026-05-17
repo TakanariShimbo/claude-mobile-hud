@@ -30,14 +30,8 @@ import com.example.claudemobilehud.phone.data.model.Settings
 import kotlinx.coroutines.launch
 
 /**
- * Hub 接続設定 + OpenAI API key の編集 dialog。
- *
- * **QR pairing** (Phase 4-6 で実装):
- *   - 「QR スキャン」ボタンで [QrScanner.scan] を呼び ML Kit Code Scanner を起動。
- *   - 結果を [Pairing.parse] に流して baseUrl / token をフィールドにセット。
- *   - openAiApiKey は QR には乗らない (端末固有 secret なので手入力のまま保持)。
- *   - スキャン失敗 / payload 解釈失敗は dialog 内 inline text で出す (snackbar は dialog 外
- *     なので AlertDialog の中で見せにくい)。
+ * Hub 接続設定 + OpenAI API key 編集 dialog (docs/03 §3.5.1.2)。QR pairing 経路、
+ * scanError の rememberSaveable (P3-E)、token の即時 validation (#189) は §3.5.1.2 を参照。
  */
 @Composable
 fun SettingsDialog(
@@ -48,7 +42,6 @@ fun SettingsDialog(
     var url by remember { mutableStateOf(initial.baseUrl) }
     var token by remember { mutableStateOf(initial.token) }
     var openAiKey by remember { mutableStateOf(initial.openAiApiKey) }
-    // P3-E of 5-6 review: scanError は config change (回転等) で消えないよう rememberSaveable に。
     var scanError by rememberSaveable { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -79,7 +72,7 @@ fun SettingsDialog(
                                     }
                             }
                             .onFailure { e ->
-                                // ユーザの能動的キャンセルは「失敗」扱いしない (UX 上の noise)。
+                                // docs/03 §3.2.6.4: 能動キャンセルは UX noise なので error 扱いしない。
                                 if (e !is QrScanCancelled) {
                                     scanError = "スキャン失敗: ${e.message ?: e}"
                                 }
@@ -106,10 +99,7 @@ fun SettingsDialog(
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
-                // P3 of 4d review (#189): token は OkHttp の HTTP header value 制約
-                // (ASCII printable 0x20-0x7E) 内でないと送信時に IllegalArgumentException
-                // で死ぬ (ChannelClient で AuthFailed に翻訳済みだが、ここで入力段階で
-                // 弾く方がラウンドトリップ削減できて UX 良い)。
+                // docs/03 §3.5.1.2: 送信時の AuthFailed 翻訳より前に入力段階で弾く UX 改善 (#189)。
                 val tokenError = remember(token) {
                     val invalidIdx = token.indexOfFirst { c ->
                         c.code < 0x20 || c.code > 0x7E
@@ -157,8 +147,6 @@ fun SettingsDialog(
             }
         },
         confirmButton = {
-            // tokenError は text section の上で計算済み (token に依存する derived state)。
-            // ここで参照したいが composition 階層が違うのでもう一度計算する (cheap).
             val tokenInvalid = token.any { c -> c.code < 0x20 || c.code > 0x7E }
             FilledTonalButton(
                 onClick = {

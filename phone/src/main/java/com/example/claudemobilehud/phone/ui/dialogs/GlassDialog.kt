@@ -30,16 +30,11 @@ import com.example.cxrglobal.auth.AuthorizationHelper
 import kotlinx.coroutines.launch
 
 /**
- * Glass 接続管理 dialog。CXR-L 認可 → 接続 → 切断のライフサイクル UI。
- *
- * - `TokenStore.token` が null → Hi Rokid 認可ボタンを出す。
- * - token あり / 未接続 → 接続ボタン (= AppLifecycleController.startGlassSession)。
- * - 接続中 → 切断ボタン (= stopGlassSession)。
+ * Glass 接続管理 dialog (docs/03 §3.5.1.1)。state machine と display の関係、RECORD_AUDIO
+ * runtime permission 経路、「認可を解除」の操作順序 (P3-F) は §3.5.1.1 を参照。
  */
 @Composable
 fun GlassDialog(onDismiss: () -> Unit) {
-    // P2-D of 4c2 review: PhoneApplication.onCreate で 1 度 load 済みなので
-    // dialog 表示の度に main thread で EncryptedSharedPreferences を decrypt しない。
     val context = LocalContext.current
     val storedToken by TokenStore.token.collectAsStateWithLifecycle()
     val app = context.applicationContext as PhoneApplication
@@ -48,11 +43,6 @@ fun GlassDialog(onDismiss: () -> Unit) {
     val cxrState by GlassConnectionService.connState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
-    // Mic FGS は Android 14+ で RECORD_AUDIO runtime 権限取得済みが必須 (targetSDK=36 で
-    // 更に厳格化、未取得で startForeground(MICROPHONE) を呼ぶと SecurityException で
-    // クラッシュ)。「接続」押下時に未取得なら runtime permission を取り、grant 後に
-    // startGlassSession に進む経路にする。拒否時は何もしない (ユーザは Settings 経由で
-    // 許可してから再度押せば良い)。
     val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
@@ -62,10 +52,7 @@ fun GlassDialog(onDismiss: () -> Unit) {
     }
 
     val hasToken = !storedToken.isNullOrBlank()
-    // P2-G of 4c2 review: 表示 label と button 分岐の真実値は lifecycle.glassState に
-    // 集約。GlassConnectionService.connState は CXR-L レベルの補助情報として「接続済み /
-    // 接続中…」の差を出すためだけに利用する。lifecycle が Stopping/Off なら cxrState は
-    // 無視する。
+    // docs/03 §3.5.1.1: 表示の真実値は lifecycle.glassState、cxrState は補助情報。
     val running = glassState != AppLifecycleController.GlassFgsState.Off
     val connectionLabel = when {
         glassState == AppLifecycleController.GlassFgsState.Off -> "停止中"
@@ -131,16 +118,7 @@ fun GlassDialog(onDismiss: () -> Unit) {
         },
         dismissButton = {
             if (hasToken) {
-                // P3-F of 4c2 review: 「認可を解除」は
-                //   1. 現在 Glass session が動いていれば stopGlassSession を投げる
-                //      (suspend → lifecycle が Stopping → Off に遷移)
-                //   2. その完了を待たずに TokenStore.clear (EncryptedSharedPreferences)
-                //      を即同期で実行する。
-                // 順序を入れ替えない理由: token を先に clear すると、stopGlassSession
-                // 中に GlassRelay が token を要求するパスで `TokenMissing` が
-                // _errors に流れ、ユーザには「解除中なのにエラー」に見える。stop を
-                // 先 fire-and-forget → clear (sync) で「stop が in-flight でも token は
-                // もう無い」状態に。残作業は lifecycle が watchdog で畳む。
+                // docs/03 §3.5.1.1 (P3-F): stop fire-and-forget → clear sync の順番固定。
                 TextButton(onClick = {
                     if (running) scope.launch { lifecycle.stopGlassSession(context) }
                     TokenStore.clear(context)

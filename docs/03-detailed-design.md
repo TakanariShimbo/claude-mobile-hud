@@ -1877,6 +1877,46 @@ fun MainScreen(viewModel: ChatViewModel = viewModel()) {
 - `MainScreenEffects`: LaunchedEffect 群 (snackbar / dialog 自動表示)
 - `MainScreenDialogState`: ダイアログ open/close + snackbar 状態
 
+##### 3.5.1.1 `GlassDialog` (Glass 接続管理 UI)
+
+CXR-L 認可 → 接続 → 切断のライフサイクル UI。3 状態で confirm ボタンが分岐する:
+
+| 状態 | confirm ボタン | dismiss ボタン |
+|---|---|---|
+| `TokenStore.token == null` | Hi Rokid 認可ボタン | 閉じる |
+| token あり / 未接続 | 接続 (= `startGlassSession`) | 認可を解除 |
+| 接続中 | 切断 (= `stopGlassSession`) | 認可を解除 |
+
+**接続表示 label の真実値は `lifecycle.glassState`** (P2-G): `GlassConnectionService.connState` は CXR-L レベルの補助情報として「接続済み / 接続中…」の差を出すためだけに利用。`Off` / `Stopping` / `Starting` のときは `cxrState` を無視する (lifecycle と CXR-L が並行に動くため、片方しか見ないと state machine と表示が乖離する)。
+
+**接続ボタン押下時の RECORD_AUDIO runtime permission**: Android 14+ で Mic FGS-microphone は **`RECORD_AUDIO` 取得済が必須** (§3.3.4.1)。ボタン押下時に未取得なら `rememberLauncherForActivityResult` で runtime permission を要求し、grant 後に `startGlassSession` を呼ぶ。拒否時は何もしない (Settings から再許可後に再押下する経路に倒す)。
+
+**「認可を解除」の操作順序 (P3-F)**: 次の順序を**入れ替えない**:
+1. running なら `stopGlassSession` を投げる (suspend → lifecycle が Stopping → Off)
+2. **完了を待たずに** `TokenStore.clear` を即同期で実行
+
+token を先に clear すると、stopGlassSession 中に GlassRelay が token を要求するパスで `TokenMissing` が `_errors` に流れ「解除中なのにエラー」とユーザに見える。stop fire-and-forget → clear sync で「stop が in-flight でも token はもう無い」状態にし、残作業は lifecycle の watchdog で畳む。
+
+##### 3.5.1.2 `SettingsDialog` (Hub 接続設定 + API key)
+
+QR pairing + 手動入力で `Settings` を編集。
+
+**QR スキャン経路**: `QrScanner.scan(context)` → `Pairing.parse(raw)` (§3.2.6) → `baseUrl` / `token` フィールドにセット。`openAiApiKey` は端末固有 secret なので QR には乗らず手入力のまま保持。
+
+**スキャン / 解釈エラーの表示**: dialog 内 inline text (`AlertDialog` の中で snackbar は出せない)。`scanError` は `rememberSaveable` で config change (回転等) を超えて保持 (P3-E)。`QrScanCancelled` (= ユーザの能動キャンセル) は error 扱いせず、UX noise を排除 (§3.2.6.4)。
+
+**token 入力時の即時 validation (#189)**: OkHttp の HTTP header value は **ASCII printable (0x20-0x7E)** のみ受理 (§3.2.2.3)。送信時の `AuthFailed` 翻訳経路は機能するが、`SettingsDialog` で **入力段階で弾く** ことで Hub round-trip を省く UX 改善:
+
+```kotlin
+val tokenError = remember(token) {
+    val invalidIdx = token.indexOfFirst { c -> c.code < 0x20 || c.code > 0x7E }
+    if (invalidIdx >= 0) "ASCII 印字可能文字 (0x20-0x7E) のみ..." else null
+}
+// 保存ボタンは tokenError != null のとき disabled
+```
+
+**保存時の正規化**: `baseUrl.trimEnd('/')` で末尾 slash を取り除いてから保存 (`Pairing.parse` と同じ正規化)。
+
 #### 3.5.2 `ChatViewModel`
 
 ```kotlin
