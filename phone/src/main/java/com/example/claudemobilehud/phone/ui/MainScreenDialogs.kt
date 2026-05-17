@@ -48,8 +48,9 @@ fun MainScreenDialogs(
 
     // 現在見ているセッションの pending だけを in-app ダイアログで表示。別 session の
     // permission は通知シェードの Allow/Deny で処理できるので画面遷移を奪わない (glass 側
-    // のフィルタと対称)。
-    val currentPending = ui.pendingPermissions.filter { it.sessionId == ui.currentSessionId }
+    // のフィルタと対称)。filter は Repository.combine で計算済み (`ui.pendingForCurrent`)、
+    // UI はそれを読むだけ (P1-6 of AC-05)。
+    val currentPending = ui.pendingForCurrent
     val pending = currentPending.firstOrNull()
     if (pending != null) {
         // P1-B of 4c2 review: `respondPermission` は suspend で網羅に時間がかかり、

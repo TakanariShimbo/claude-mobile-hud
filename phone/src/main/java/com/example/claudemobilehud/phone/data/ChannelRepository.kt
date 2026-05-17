@@ -199,11 +199,17 @@ class ChannelRepository(
             _attachedImage,
             connectivity,
         ) { draft, sessionSnap, pending, image, conn ->
+            // P1-6 of AC-05: 現 session 宛の pending は Repository 側で filter。UI から
+            // この計算を吹き飛ばすため `pendingForCurrent` フィールドに乗せて渡す。
+            val pendingForCurrent = sessionSnap.currentSessionId?.let { cid ->
+                pending.filter { it.sessionId == cid }
+            }.orEmpty()
             PhoneUiState(
                 sessions = sessionSnap.sessions,
                 currentSessionId = sessionSnap.currentSessionId,
                 messages = sessionSnap.messages,
                 pendingPermissions = pending,
+                pendingForCurrent = pendingForCurrent,
                 inputText = draft.inputText,
                 attachedImage = image,
                 mode = draft.mode,
@@ -362,20 +368,11 @@ class ChannelRepository(
             )
             return
         }
-        // ImageProcessor は localPath だけ持つ ImageAttachment を返す (`ImageProcessor.encode`
-        // 注釈参照)。Hub には `image_base64` + `image_mime` で渡す契約なので、ここで file →
-        // base64 を行う。読み込み失敗 (cache 削除 / 容量 etc) は handleSendFailure 経路で
-        // ロールバック (input/image 復元)。Hub 側は 16MB body limit (base64 込みのサイズ)。
-        val imageBase64: String? = image?.let { att ->
-            try {
-                withContext(Dispatchers.IO) {
-                    val bytes = File(att.localPath).readBytes()
-                    Base64.encodeToString(bytes, Base64.NO_WRAP)
-                }
-            } catch (err: Throwable) {
-                handleSendFailure(pending, text, image, err)
-                return
-            }
+        val imageBase64 = try {
+            image?.let { encodeImageBase64(it) }
+        } catch (err: Throwable) {
+            handleSendFailure(pending, text, image, err)
+            return
         }
         val result = client.send(
             text = text,
@@ -384,28 +381,48 @@ class ChannelRepository(
             imageBase64 = imageBase64,
         )
         result
-            .onSuccess { resp ->
-                log.info(
-                    "send_ok",
-                    "chat_id" to resp.chatId,
-                    "session_id" to (resp.sessionId ?: ""),
-                )
-                // FR-PH-55: pending (UNKNOWN bucket / chatId=null) に chat_id + session_id を貼る。
-                // これで後続 SseEvent.Reply の SessionStore.mergeUnknownSession が正規 session へ移送できる。
-                sessionStore.assignChatIdToPending(pending.id, resp.chatId, resp.sessionId)
-                // POC port: 送信成功で当該 session の confirming flag を畳む (Glass の
-                // CONFIRMING UI から抜ける)。失敗時は handleSendFailure 経由で input が
-                // 復元されるので flag は維持する (再送できる状態のままにする)。
-                // P2-B of review: `resp.sessionId` (Hub mint された正規 id) を優先し、
-                // null の場合のみ送信時の `sessionId` snapshot に fallback する。
-                // 理由: send() 開始時点で session 未確定 (UNKNOWN bucket) → Hub が新規
-                // session を mint した経路では、setConfirming は新 id 側で false にしないと
-                // confirming flag が古い `sessionId == null` キーに残り続け、後で session
-                // が正規化された時に CONFIRMING UI が残留する。
-                resp.sessionId?.let { setConfirming(it, false) } ?: setConfirming(sessionId, false)
-                _events.tryEmit(ChannelEvent.Sent(resp.chatId, pending.id))
-            }
+            .onSuccess { resp -> onSendSuccess(resp, sessionId, pending) }
             .onFailure { err -> handleSendFailure(pending, text, image, err) }
+    }
+
+    /**
+     * P1-7 of AC-05: 画像 base64 化を `send()` から抽出。`ImageProcessor` は localPath
+     * だけ持つ `ImageAttachment` を返す (`ImageProcessor.encode` 注釈) ので、Hub に
+     * `image_base64` + `image_mime` で渡すために送信直前で file → base64 する。
+     * 読み込み失敗 (cache 削除 / 容量 etc) は throw して caller (`send()`) が
+     * `handleSendFailure` でロールバックする契約。Hub 側 body 上限は 16MB
+     * (base64 込み)、Phone 側 11MB raw で fail-fast する (`ImageProcessor.MAX_BYTES`)。
+     */
+    private suspend fun encodeImageBase64(image: ImageAttachment): String =
+        withContext(Dispatchers.IO) {
+            val bytes = File(image.localPath).readBytes()
+            Base64.encodeToString(bytes, Base64.NO_WRAP)
+        }
+
+    /**
+     * P1-7 of AC-05: 送信成功時の副作用 3 件を `send()` から抽出。
+     *   - FR-PH-55: pending (UNKNOWN bucket / chatId=null) に chat_id + session_id を貼る。
+     *     後続 `SseEvent.Reply` で `SessionStore.mergeUnknownSession` が正規 session
+     *     へ移送する材料になる。
+     *   - POC port: confirming flag を畳む (Glass の CONFIRMING UI から抜ける)。
+     *     `resp.sessionId` (Hub mint された正規 id) を優先し、null の場合のみ送信時の
+     *     snapshot にフォールバック (UNKNOWN bucket → 新規 session mint 経路で、古い
+     *     `sessionId == null` キーに confirming が残らないようにする、P2-B of 4d review)。
+     *   - ChannelEvent.Sent emit で UI 側 snackbar / 通知トリガに材料を流す。
+     */
+    private suspend fun onSendSuccess(
+        resp: ChannelClient.SendResponse,
+        requestSessionId: String?,
+        pending: ChatMessage,
+    ) {
+        log.info(
+            "send_ok",
+            "chat_id" to resp.chatId,
+            "session_id" to (resp.sessionId ?: ""),
+        )
+        sessionStore.assignChatIdToPending(pending.id, resp.chatId, resp.sessionId)
+        resp.sessionId?.let { setConfirming(it, false) } ?: setConfirming(requestSessionId, false)
+        _events.tryEmit(ChannelEvent.Sent(resp.chatId, pending.id))
     }
 
     /**
