@@ -19,7 +19,7 @@ Phase 1 で「何を作るか」が決まった。本文書では「どう構造
 - コンポーネント間で流れるデータ (wire protocol) — **送信側 / 受信側両方の規約**
 - 主要シナリオがコンポーネント間でどう実現されるか (正常系 + エラー path)
 - 横断的設計判断 (AD-NN として番号付け)
-- POC で痛かった構造的負債 (mode race / FGS 結合 / wire 二重定義) を**設計レベルで先回り**
+- 構造的負債 (mode race / FGS 結合 / wire 二重定義) を**設計レベルで先回りして避ける**
 
 クラス図 / メソッドシグネチャ / 各 algorithm の実装詳細は **Phase 3** に送る。
 
@@ -27,10 +27,9 @@ Phase 1 で「何を作るか」が決まった。本文書では「どう構造
 
 | 項目 | 確定値 | 根拠 |
 |---|---|---|
-| NFR-40a (Glass 未接続 8h 電池) | **< 10%** 維持 (実機計測で見直し可) | POC で同条件相当の常駐 FGS が許容範囲だった |
+| NFR-40a (Glass 未接続 8h 電池) | **< 10%** 維持 (実機計測で見直し可) | 同条件相当の常駐 FGS が許容範囲となる経験則 |
 | NFR-40b (Glass 接続 8h 電池) | **< 25%** 維持 (実機計測で見直し可) | BT + マイク待機ぶんの加算 |
 | NFR-41 (履歴サイズ上限) | **20 MB / session, 200 MB 全体**。LRU 退避 | 画像 200KB × 100 件相当 / 個人ツールとして 1 ヶ月程度の履歴を想定 |
-| POC 履歴 JSON の移行 | **行わない** (v2 から新規)。POC 終了時に手動エクスポート可能ならユーザ責任で対応 | wire / schema が新規となるため、移行コードが本質的に複雑になる割に利得が小さい |
 | マルチセッション数上限 | **ハード制限なし**。NFR-41 (200 MB 全体) のソフトキャップに自然に収まる | 個人ツールで session 5 個を超える運用は稀 |
 | Glass 接続未確立しきい値 (FR-GL-05) | **15 秒** | Hi Rokid のブローカー初期化に最大 10 秒程度。余裕を見て 15 秒 |
 
@@ -125,11 +124,11 @@ Phase 1 で「何を作るか」が決まった。本文書では「どう構造
 
 | 認証 | 発行 | 保管 | 失効 | 再交付 |
 |---|---|---|---|---|
-| X-Token (Phone↔Hub) | Hub 起動時に永続値を `.env` に保存。CLI `claude-channel rotate-token` で再生成 | Phone: DataStore (平文), Hub: `.env` (ファイル権限) | rotate-token 実行で旧 token 無効化 | QR 再スキャン |
+| X-Token (Phone↔Hub) | Hub 起動時に永続値を `.env` に保存。CLI `claude-mobile-hud rotate-token` で再生成 | Phone: DataStore (平文), Hub: `.env` (ファイル権限) | rotate-token 実行で旧 token 無効化 | QR 再スキャン |
 | CXR-L token (Phone↔Glass) | Hi Rokid アプリ経由 | Phone: EncryptedSharedPreferences | Phone UI「認可を解除」 | Hi Rokid 認可フロー再実行 |
 | OpenAI API Key | ユーザが設定で投入 | Phone: DataStore (平文) | UI で削除 | UI で再入力 |
 
-**端末紛失時運用**: Phone 紛失なら PC 側で `claude-channel rotate-token` を実行 → 旧 token は即座に無効化される。新 Phone で QR 再ペアして復旧。Glass token は Hi Rokid 側 (Rokid アカウント) で revocation 可能 (本プロジェクト範囲外)。
+**端末紛失時運用**: Phone 紛失なら PC 側で `claude-mobile-hud rotate-token` を実行 → 旧 token は即座に無効化される。新 Phone で QR 再ペアして復旧。Glass token は Hi Rokid 側 (Rokid アカウント) で revocation 可能 (本プロジェクト範囲外)。
 
 ---
 
@@ -139,7 +138,7 @@ Phase 1 で「何を作るか」が決まった。本文書では「どう構造
 
 | プロセス | 寿命 | 起動者 | 停止条件 |
 |---|---|---|---|
-| Hub daemon | 長寿命 (PC 起動中常駐) | ユーザが手動で起動 (`claude-channel hub`) | ユーザが手動停止 / PC 再起動 |
+| Hub daemon | 長寿命 (PC 起動中常駐) | ユーザが手動で起動 (`claude-mobile-hud hub`) | ユーザが手動停止 / PC 再起動 |
 | Bridge | 1 Claude session に 1 つ | Claude Code が `--mcp-config` 経由で生成 | Claude session 終了で die |
 | Phone Activity (`MainActivity`) | ユーザの能動利用中 | ランチャタップ | バックグラウンド遷移後 OS 任せ |
 | Phone ChannelService (FGS, remoteMessaging) | Phone app 起動中ずっと | `AppLifecycleController.startChannel` | `stopChannel` / `shutdownAll` |
@@ -149,7 +148,7 @@ Phase 1 で「何を作るか」が決まった。本文書では「どう構造
 
 ### 3.2 FGS オーケストレーション (AD-05)
 
-POC の負債 (`GlassConnectionService` が `MicForegroundService.start/stop` を直接呼ぶ) を解消するため、**FGS 単体は他 FGS の存在を知らない**。代わりに `AppLifecycleController` (Phone app の object) が "用途" 単位の起動/停止を提供する。
+FGS 同士の直接結合 (例: `GlassConnectionService` から `MicForegroundService.start/stop` を呼ぶような形) は責務境界を曖昧にするため避ける。設計の原則は **FGS 単体は他 FGS の存在を知らない**。代わりに `AppLifecycleController` (Phone app の object) が "用途" 単位の起動/停止を提供する。
 
 #### 3.2.1 公開 API (Phase 3 で署名確定)
 
@@ -314,7 +313,7 @@ TS 側にも同様の golden ペアを置く。**Kotlin encode→TS decode** と
 | `hello` | `ts` | Glass プロセス起動 / Phone への state 再 push 要求 |
 | `select_session` | `id` | session 切替 |
 | `gesture` | `which` ("tap"/"double_tap"/"swipe_forward"/"swipe_back") | ジェスチャ通知 (現 mode に応じて Phone 側で意味解釈) |
-| `listening_cancel` | (none) | Listening 中の DoubleTap = 録音停止 + 入力クリアを **atomic に** 表現 (POC の 2 連送信を廃止、P1-改善) |
+| `listening_cancel` | (none) | Listening 中の DoubleTap = 録音停止 + 入力クリアを **atomic に** 表現 (2 連送信に分けると中間 state が漏れるため専用 wire を用意) |
 | `permission_verdict` | `request_id`, `decision` ("allow"/"deny") | permission 応答 |
 
 ### 4.4 フィールド命名規約
@@ -693,7 +692,7 @@ Phone の network 状態変化 (WiFi 切替 / Tailscale 接続 / アンメッシ
 
 ### 7.1 AD-03: mode + payload atomicity (NFR-13 / P1-4 解消)
 
-**問題**: POC では `current_mode` と `pending_permission` を別 wire で push していたため、Glass / Phone 双方で 1 描画フレーム内に乖離する可能性があった。
+**問題**: `current_mode` と `pending_permission` のようなフィールドを別 wire で push する素朴な構造では、Glass / Phone 双方で 1 描画フレーム内に状態が乖離する hazard がある。
 
 **決定**:
 1. 単一の `current_state` wire イベントを定義し、mode 決定に関わる全 payload を 1 つにまとめて送る
@@ -709,7 +708,7 @@ Phone の network 状態変化 (WiFi 切替 / Tailscale 接続 / アンメッシ
 
 **影響**:
 - Glass 側 `dispatch` は `current_state` イベント 1 つで主要状態を全更新 (個別 setter は提供しない)
-- 個別 wire (`current_mode` / `pending_permission` / `transcript_state` / `input_text`) は廃止 (POC からの非互換変更)
+- 個別 wire (`current_mode` / `pending_permission` / `transcript_state` / `input_text`) は提供しない
 - AC-09 (mode race) は §7.7 の自動検証手段で機械的に判定可能
 
 ### 7.2 AD-01: wire protocol の物理表現
@@ -743,16 +742,16 @@ Phone の network 状態変化 (WiFi 切替 / Tailscale 接続 / アンメッシ
 
 ### 7.4 AD-04: 再接続戦略
 
-**決定**: 指数バックオフ。初期 1 秒、係数 2、上限 30 秒、ジッタ ±25%。成功で 1 秒にリセット。Hub↔Phone (SSE) と Phone↔Glass (CXR-L) で共通の戦略。Glass↔Phone は再接続成立後に Glass から `hello` wire を送ることで Phone 側の全 StateFlow 再エミットを誘発 (POC で実装済みのパターン継続)。
+**決定**: 指数バックオフ。初期 1 秒、係数 2、上限 30 秒、ジッタ ±25%。成功で 1 秒にリセット。Hub↔Phone (SSE) と Phone↔Glass (CXR-L) で共通の戦略。Glass↔Phone は再接続成立後に Glass から `hello` wire を送ることで Phone 側の全 StateFlow 再エミットを誘発する。
 
 **根拠**:
 - NFR-10 (再接続成功率 100%, 復旧中央値 < 30s) を満たす最小限の戦略
 - 30 秒上限は Hub の再起動 / WiFi 切替の最悪ケースをカバーしつつ、復旧中央値 < 30s と整合
 - ジッタは個人ツール (single client) では理論上不要だが、Hub 起動中の競合を回避する保険
 
-### 7.5 AD-05: FGS オーケストレーション (P1-5 解消)
+### 7.5 AD-05: FGS オーケストレーション
 
-**問題**: POC では `GlassConnectionService.start/stop` が内部で `MicForegroundService.start/stop` を呼んでいた = FGS 同士が結合 (P1-5)。さらに「複数 FGS の状態遷移の一貫性」を保つ責務を誰も持っていなかった (連打 / 自然切断 / shutdown が走った時の挙動が暗黙)。
+**問題**: 素朴な構造では `GlassConnectionService.start/stop` が内部で `MicForegroundService.start/stop` を呼ぶような FGS 同士の結合が生まれやすい。さらに「複数 FGS の状態遷移の一貫性」を保つ責務を誰も持っていない場合、連打 / 自然切断 / shutdown が走った時の挙動が暗黙になる。
 
 **決定**:
 1. `AppLifecycleController` (Phone app object) を導入し、FGS の起動/停止は必ずこの controller を経由 (§3.2.1)
@@ -804,7 +803,7 @@ Phone の network 状態変化 (WiFi 切替 / Tailscale 接続 / アンメッシ
 
 ### 7.8 AD-06: エラーモデル (Rev 2 新規)
 
-**問題**: POC では `String` ベースのエラー (`sendError = e.message ?: e.toString()`) と `runCatching + Log.w` の暗黙握りつぶしが混在。Phase 1 で要求された「明示的エラー」(FR-PH-13/14/16/22, FR-GL-44) の実装根拠が無い。
+**問題**: `String` ベースの素朴なエラー (`sendError = e.message ?: e.toString()`) や `runCatching + Log.w` による暗黙握りつぶしを許すと、Phase 1 で要求された「明示的エラー」(FR-PH-13/14/16/22, FR-GL-44) を満たす実装根拠が無くなる。
 
 **決定**:
 1. **`sealed class WireError`** を `:protocol` module または各 app の data 層で定義
@@ -848,7 +847,7 @@ WireError
 
 **代替案と却下理由**:
 - 例外 throw 継続: ハンドル漏れの温床、Compose の宣言的 UI と相性悪い
-- 単一 `error: String?` (POC 継承): 表現マッピングを UI 各所で書くことになり DRY 違反
+- 単一 `error: String?`: 表現マッピングを UI 各所で書くことになり DRY 違反
 
 ### 7.9 AD-07: Token 寿命 / rotation / revocation (Rev 2 新規)
 
@@ -858,13 +857,13 @@ WireError
 
 **X-Token (Phone↔Hub)**:
 - Hub 起動時に永続値を `.env` の `CLAUDE_CHANNEL_TOKEN` に保存。Hub プロセスが alive な間はこの値で認証
-- 再生成 CLI: `claude-channel rotate-token` — 既存 `.env` を上書き + Hub を再起動 (旧 token は瞬時に死ぬ)
+- 再生成 CLI: `claude-mobile-hud rotate-token` — 既存 `.env` を上書き + Hub を再起動 (旧 token は瞬時に死ぬ)
 - **Phone 側の失効検知トリガ**: `ChannelClient` が HTTP **401 Unauthorized** を受けたら `WireError.Connection.AuthFailed` を Repository に emit → UI 層が**自動で設定ダイアログを表示**しつつ snackbar で「token が無効です。QR を再スキャンしてください」を出す
 - SSE 接続も同様: SSE establish 時の HTTP 401 → reconnect ループを止め、AuthFailed 状態を保持 (再ペアまで再試行しない)
 
 **Glass CXR-L token**:
 - Hi Rokid 経由で取得し、Phone の EncryptedSharedPreferences に保存
-- Phone UI に「認可を解除」ボタン (POC 既存) — タップで Phone 側 storage と GlassConnectionService を停止
+- Phone UI に「認可を解除」ボタン — タップで Phone 側 storage と GlassConnectionService を停止
 - 再認可は Hi Rokid フロー再実行
 
 **OpenAI API Key**:
@@ -872,7 +871,7 @@ WireError
 - 失効はユーザが UI で削除して再入力
 
 **端末紛失時の運用** (ドキュメント上の手順):
-- Phone 紛失 → PC で `claude-channel rotate-token` → 旧 Phone は接続失敗で実質失効
+- Phone 紛失 → PC で `claude-mobile-hud rotate-token` → 旧 Phone は接続失敗で実質失効
 - Glass 紛失 → Hi Rokid (Rokid アカウント側) で revocation (本プロジェクト範囲外)
 
 **Phase 3 で確定**: Phone 側で「token 期限切れ → 自動でダイアログ表示」のトリガ実装、CLI コマンドの詳細仕様。
@@ -904,7 +903,7 @@ WireError
 - 再圧縮: JPEG quality 80
 - **EXIF 全除去** (位置情報含む、回転情報を除く — 回転はピクセル上で適用)
 - 出力: `base64 + mime` ペア (`image/jpeg` 固定)
-- 履歴保存サイズ: 圧縮後の base64 文字列をそのまま JSON に埋め込む (現行 POC 通り)
+- 履歴保存サイズ: 圧縮後の base64 文字列をそのまま JSON に埋め込む
 
 **Phase 3 で確定**: 具体的な Bitmap 処理コード、エラー (壊れた画像 / 巨大画像のメモリ溢れ) ハンドリング詳細。
 
@@ -917,7 +916,7 @@ WireError
 
 **UI 表現**:
 - 現 session の先頭 1 件 → `PermissionDialog` (FR-PH-44)
-- 他 session の件数 → タイトルに「+他 N 件」表示 (POC 既存ロジック継承)
+- 他 session の件数 → タイトルに「+他 N 件」表示
 - ドロワー (FR-PH-44 should) で全 pending を session 別にグルーピング表示 (Phase 3 詳細)
 
 **根拠**: 現 session 優先 = ユーザが見ているコンテキストを尊重。FIFO = 古い要求から処理 (タイムアウト前に拾える可能性)。
@@ -945,11 +944,11 @@ WireError
 - Compose 内では `stringResource(R.string.xxx)` を徹底
 - ログ / 内部識別子 (event 名等) は英語固定 (リソース化不要)
 
-**根拠**: 個人ツールで v1.0 は日本語固定で十分だが、POC のハードコード方式 (`"接続中…"` リテラル直書き) は後で痛い。**最初からリソース化規約**を設けるだけでコストはほぼ無い。
+**根拠**: 個人ツールで v1.0 は日本語固定で十分だが、ハードコード方式 (`"接続中…"` のリテラル直書き) は将来の言語追加でコストが膨らむ。**最初からリソース化規約**を設けるだけで実装コストはほぼ無い。
 
 ### 7.14 AD-12: 観測性 / 相関 ID 伝播 (Rev 2 新規)
 
-**問題**: POC は `Log.d/i/w` の自由フォーマット。複数経路を流れる 1 つの操作 (例: Phone POST /send → Hub → Bridge → Claude reply tool → Phone SSE reply) を後で追跡する手段が無い。
+**問題**: `Log.d/i/w` の自由フォーマットでは、複数経路を流れる 1 つの操作 (例: Phone POST /send → Hub → Bridge → Claude reply tool → Phone SSE reply) を後で追跡する手段が無い。
 
 **決定**:
 1. **構造化ログ形式** (key=value 型) を全レイヤで採用:
@@ -990,7 +989,6 @@ WireError
 | §11.1 NFR-40a 電池 (未接続) | < 10% (実機計測で見直し可) | §1.2 |
 | §11.1 NFR-40b 電池 (接続中) | < 25% (実機計測で見直し可) | §1.2 |
 | §11.1 NFR-41 履歴上限 | 20 MB/session, 200 MB 全体, LRU | §1.2, §7.6 |
-| §11.1 POC JSON 移行 | 行わない | §1.2 |
 | §11.1 マルチセッション上限 | ハード制限なし (200 MB ソフトキャップで自然抑制) | §1.2 |
 | §11.1 Glass 接続未確立しきい値 | 15 秒 | §1.2 |
 | §11.2 wire 物理表現 | Caps + JSON (論理型から派生) | §4.1, AD-01 |

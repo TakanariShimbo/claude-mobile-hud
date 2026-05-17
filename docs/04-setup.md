@@ -142,7 +142,7 @@ dependencies {
 「Host」= PC 側 Hub に対する**端末側のハブ** (Phone が中継拠点)。
 「Client」= Phone に対する**ウェアラブル端末** (Glass はジェスチャ / HUD 表示専門)。
 
-POC では package が `host` / `client` だったが、v2 では package を `phone` / `glass` (役割名ではなく物理デバイス名) に変更している。表示名は引き続き Host / Client を使うことで、技術的な責務 (どちらが state を持つか) が表現される。
+package 名は物理デバイス名 (`phone` / `glass`) を採用し、表示名で技術的な責務 (Host = state を持つ / Client = HUD 表示) を表現する二段構造にしている。
 
 ### 5.4 確認
 
@@ -174,7 +174,7 @@ POC では package が `host` / `client` だったが、v2 では package を `p
 - **JAVA_HOME**: Android Studio バンドル JBR を export しないと `./gradlew` 直叩きで「JAVA_HOME is not set」エラー
 - **Android SDK パス**: `local.properties` (gitignore 済み) で `sdk.dir=/path/to/sdk` を設定。Android Studio 経由なら自動生成
 - **cxrglobal submodule**: clone 時に `--recurse-submodules` を忘れると Glass app のビルドが失敗する
-- **Compose compiler**: Kotlin 2.x なので Plugin 経由 (`kotlin-compose` plugin)。POC とは設定が違うので注意
+- **Compose compiler**: Kotlin 2.x なので Plugin 経由 (`kotlin-compose` plugin) を必ず使う
 
 ---
 
