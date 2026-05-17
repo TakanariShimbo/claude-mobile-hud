@@ -1,19 +1,8 @@
 package com.example.claudemobilehud.phone.data.model
 
 /**
- * Hub から SSE で来るイベントを Phone-local の sealed class で表現。Phase 2 §4.3.1。
- *
- * 接続ライフサイクル (`Open` / `Failure` / `AuthFailed`) と wire イベントを 1 つの
- * sealed で扱うことで、ConnectionController と SessionStore が同じ flow を購読できる。
- *
- * Wire との対応 (event type → sealed):
- *   reply              → Reply
- *   permission         → Permission
- *   permission_abort   → PermissionAbort
- *   session_active     → SessionActive
- *   session_inactive   → SessionInactive
- *   session_snapshot   → SessionSnapshot
- *   permission_snapshot → PermissionSnapshot
+ * Hub からの SSE と接続ライフサイクルを 1 つの sealed に統合した Phone-local モデル
+ * (docs/03 §3.2.2.6)。wire event type → sealed のマッピング表も §3.2.2.6 を参照。
  */
 sealed class SseEvent {
     // --- 接続層由来 (Hub からの wire ではない) ---
