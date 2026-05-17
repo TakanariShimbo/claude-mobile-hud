@@ -96,7 +96,7 @@ class GlassEventDispatcher(
         // P2-A of review: gesture 受信時点の current session を冒頭で snapshot し、
         // `setConfirming(sessionId, ...)` に明示渡しする。`setConfirming(null, ...)` で
         // Repository 内 re-lookup させると、auto-switch / 通知タップ等で session が
-        // 切替わった理論 race を踏むと別 session に flag が立ちうるため、明示 snapshot で防ぐ。
+        // 切替わると理論上は race を踏み別 session に flag が立ちうるため、明示 snapshot で防ぐ。
         val sessionIdAtGesture = repository.uiState.value.currentSessionId
         when (which) {
             GestureKind.TAP -> {

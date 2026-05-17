@@ -38,7 +38,7 @@ def _norm(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
-# 優先順位: docs/03 §3.2.1.2.1 (POC 流) ─
+# 優先順位: docs/03 §3.2.1.2.1 ─
 #   LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE
 # 「mode が X を表示しているなら predicate が true である」べき、という invariant。
 # 1 行に対して上から順に評価し、最初に該当した mode の predicate が満たされなければ
