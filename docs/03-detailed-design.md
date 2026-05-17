@@ -3462,6 +3462,26 @@ wrapper はその後 `exec claude --mcp-config <生成 path> --session-id <uuid>
 
 - 並列 `run` (同一 checkout で複数 claude セッション同時起動) は未サポート (`.mcp.runtime.json` が race で上書きされる)。Phase 4 は 1 user 1 session 想定。並列が必要になったら wrapper を `mktemp` ベースに切り替える。
 
+##### 6.2.3.1 fail-fast (env 不在 / 不正 UUID)
+
+env 未設定 / 空 / UUID 正規表現に合致しない値はすべて即 throw する。`crypto.randomUUID()`
+等で fallback する誘惑があるが、絶対に許さない:
+
+- random UUID で起動すると claude の `~/.claude/projects/<slug>/<uuid>.jsonl` (起動引数の
+  `--session-id` 由来) と Hub `register` の session_id が **黙って乖離** する
+- Phone は session_active を受けて「正常」と認識するが、Claude 履歴とは無関係の幽霊
+  session が Hub に register される
+- AD-12 (session_id 相関) の前提が破壊され、再 produce / debug が極めて難しいバグになる
+
+error メッセージは「wrapper 経由 (`claude-mobile-hud run safe|yolo`) で起動せよ」を
+明示し、誤起動の修復経路を runtime に示す。
+
+##### 6.2.3.2 `processEnv` test seam
+
+`SessionDetectorOptions.processEnv` で env 源を差し替え可能にする。`bridge/test/unit.test.ts`
+で「env 未設定 / 不正 UUID / 正常 UUID」のケースを deterministic に検証するため
+(`process.env` を直接書き換えると並列テストが干渉する)。default は `process.env`。
+
 #### 6.2.4 `ImageStaging`
 
 Phone から base64 画像を受け取ったら local file に書き出し、Claude に `meta.image_path`
@@ -3527,6 +3547,71 @@ IANA 公式 4 種に限定。これ以外 (`image/heic` 等) は `isSupportedMim
 - Claude が die → Bridge も die (stdio close)
 - Hub 側 `BridgeServer` が socket close 検出 → `OutstandingPermissions.onBridgeDisconnected(bridgeSessionId)` 発火
 - Phone に `permission_abort` が自動 push (FR-HU-13)
+
+### 6.4 Bridge bootstrap / shutdown wiring (`bridge/src/index.ts`)
+
+Bridge は Claude Code から `--mcp-config` 経由で stdio 子プロセスとして起動される。
+entry (`bridge/src/index.ts`) は以下の決まった順序で初期化する。
+
+#### 6.4.1 起動順序
+
+```
+loadConfig() → StructuredLog(root) → SessionDetector.detect()
+            → ImageStaging.prepare()
+            → HubClient.connect() (register + ack 待ち、§6.2.2.2)
+            → McpServer.start() (stdio MCP)
+            → SIGTERM/SIGINT handler 登録
+```
+
+- `loadConfig`: env `HUB_HOST` / `HUB_BRIDGE_PORT` / `BRIDGE_INBOX_DIR` /
+  `BRIDGE_LOG_LEVEL` を読む。inbox は未指定なら `ImageStaging.defaultPath(pid)`
+- `SessionDetector.detect()` が **必ず** `HubClient.connect()` より先に走ること:
+  session_id が無いまま Hub と話し始めると register が壊れる
+- `HubClient.connect()` の resolve は register write 完了で返る (ack は §6.2.2.2 で
+  別経路非同期 flush)
+
+#### 6.4.2 `hub` / `mcp` を `let null` で先宣言 (P1-4)
+
+`HubClient` の `callbacks.onClose` / `onSend` / `onPermissionVerdict` は connect 後の
+socket event で発火し、callback の中で `mcp` と `shutdown` を参照する。これらは
+`HubClient` を **構築 / connect した後に** bind される変数なので、`const hub = new
+HubClient({ callbacks: { onSend: (m) => mcp.deliverSend(m), ... } })` のような書き方で
+クロージャ内の `mcp` を直接参照すると、TDZ (temporal dead zone) で参照不可な変数を
+クロージャが捕捉する事故になる。
+
+対策: `let mcp: McpServer | null = null` / `let hub: HubClient | null = null` で
+**先に null 宣言**してからインスタンスを代入し、callback 内では `mcp?.deliverSend(msg)`
+のように optional chain で参照する。これで「callback 発火が代入より先に起きても null
+で握り潰す」defense in depth と、クロージャの bind 順序問題を 1 つの定石で潰す。
+
+#### 6.4.3 `shutdown` の idempotency と signal handler 二方向
+
+`shutdown(signal)` は `shuttingDown` flag で **多重発火を抑止** (`SIGTERM` と
+`mcp_close` が同時に届くケースが現実にある — Claude の終了経路は OS signal と stdio
+close が並走する)。発火順序:
+
+1. `shuttingDown = true` (再入防止)
+2. `mcp?.close()` (stdio 切断)
+3. `hub?.close()` (TCP 切断 = Hub 側で FR-HU-13 一括 abort が走る、§5.2.3.7)
+4. `await images.cleanup()` (per-pid inbox rm)
+5. `process.exit(0)`
+
+handler 登録は `SIGTERM` と `SIGINT` の 2 つに加え、`hub.onClose("remote")` /
+`mcp.onClose` の 2 経路。合計 4 入口で同じ `shutdown` を idempotent に呼ぶ。
+
+#### 6.4.4 hub remote close → Bridge 自殺 (§5.3 と対)
+
+`HubClient.onClose(reason)` が `"remote"` を返したとき (= Hub が TCP 切断した) は
+`shutdown("hub_remote_close")` を呼んで自殺する。`"local"` (= 自分から close した)
+ときは shutdown を**呼ばない** (= shutdown 経路から `hub.close()` を呼んだ後の close
+event で再帰しないため)。Hub crash 後の運用 (Bridge も自殺 → claude が MCP server 不在で
+stuck → user が wrapper を Ctrl-C → 再起動) は §5.3 を参照。
+
+#### 6.4.5 fatal error 経路
+
+`main().catch()` で `process.stderr.write` (= structured log を経由しない) で stack
+を吐き、`process.exit(1)` で終わる。Logger は init 失敗時点で利用不能な場合があるので
+stderr 直書きにする (= bootstrap 失敗の最後の砦)。
 
 ---
 

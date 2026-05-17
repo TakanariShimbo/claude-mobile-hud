@@ -1,11 +1,5 @@
-// Bridge entry — Claude Code から子プロセスで起動される。
-// 1. SessionDetector で env `BRIDGE_SESSION_ID` から session_id を取得
-//    (`claude-mobile-hud run` wrapper が `.mcp.runtime.json` の env で inject する)
-// 2. HubClient で Hub に TCP NDJSON 接続 + register
-// 3. McpServer で stdio MCP を立ち上げ Claude と話す
-// 4. SIGTERM/SIGINT / MCP close で graceful shutdown + inbox cleanup
-//
-// Phase 3 §6。
+// docs/03 §6.4: Bridge entry — Claude Code から stdio 子プロセスで起動。
+// 起動順序 / shutdown idempotency / TDZ 回避は §6.4.1〜§6.4.5 を参照。
 
 import { HubClient } from "./HubClient.js";
 import { ImageStaging } from "./ImageStaging.js";
@@ -45,18 +39,19 @@ async function main(): Promise<void> {
         inbox_dir: config.inboxDir,
     });
 
+    // docs/03 §6.4.1: detect → prepare → connect → start の順序を厳守。
     const detector = new SessionDetector({ logger: root.withTag("session") });
     const sessionId = await detector.detect();
 
     const images = new ImageStaging(config.inboxDir, root.withTag("inbox"));
     await images.prepare();
 
+    // docs/03 §6.4.2: callback 内参照が TDZ にならないよう mcp/hub を null で先宣言 (P1-4)。
     let mcp: McpServer | null = null;
-    // hub は callbacks 内 (onClose) で同期発火し得るので、`const hub = new HubClient(...)`
-    // 宣言前にハンドラから参照される TDZ 地雷を避ける (P1-4)。
     let hub: HubClient | null = null;
     let shuttingDown = false;
     const shutdown = async (signal: string): Promise<void> => {
+        // docs/03 §6.4.3: 多重発火 (signal + mcp_close 並走) を idempotent に。
         if (shuttingDown) return;
         shuttingDown = true;
         root.info("shutdown", { signal });
@@ -76,6 +71,7 @@ async function main(): Promise<void> {
             onPermissionVerdict: (msg) => mcp?.deliverPermissionVerdict(msg),
             onClose: (reason) => {
                 root.info("hub_closed", { reason });
+                // docs/03 §6.4.4: remote close = Hub 死亡 → Bridge も自殺 (§5.3 と対)。
                 if (reason === "remote") void shutdown("hub_remote_close");
             },
         },
@@ -95,6 +91,7 @@ async function main(): Promise<void> {
     process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
+// docs/03 §6.4.5: Logger 不在の bootstrap 失敗用 fatal path (stderr 直書き)。
 main().catch((err) => {
     process.stderr.write(`[bridge] fatal: ${(err as Error).stack ?? String(err)}\n`);
     process.exit(1);
