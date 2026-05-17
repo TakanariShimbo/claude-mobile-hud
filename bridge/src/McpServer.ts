@@ -1,12 +1,5 @@
-// Claude Code 側との stdio MCP server。Phase 3 §6.2.1。
-//
-// - tool: `reply(chat_id, text)` → Claude が呼ぶ → Hub に reply 転送
-// - notification 受信: `notifications/claude/channel/permission_request` → Hub に permission 転送
-// - notification 送出:
-//     - `notifications/claude/channel` → Claude へ channel message (Hub の send を Bridge が staging 後)
-//     - `notifications/claude/channel/permission` → Claude へ verdict (Hub からの permission_verdict)
-//
-// 重要: stdout は MCP プロトコル専用。console.log は絶対に使わない (StructuredLog は stderr)。
+// docs/03 §6.2.1: Claude Code 側との stdio MCP server。reply tool / permission 双方向 forward。
+// docs/03 §6.2.1.1: stdout は MCP プロトコル専有。console.log 禁止 (StructuredLog は stderr 一本)。
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -23,7 +16,7 @@ import type { SendMessage, PermissionVerdictMessage } from "./wire/HubWire.js";
 import type { Logger } from "./log/StructuredLog.js";
 
 const SERVER_NAME = "claude-mobile-hud-bridge";
-// package.json から version を読む (二重管理回避、P3-1)。
+// docs/03 §6.2.1.3: package.json version との二重管理回避 (P3-1)。
 const SERVER_VERSION: string = ((): string => {
     try {
         const pkgUrl = new URL("../package.json", import.meta.url);
@@ -34,6 +27,7 @@ const SERVER_VERSION: string = ((): string => {
     }
 })();
 
+// docs/03 §6.2.1.2: Claude への user-facing contract。reply tool / chat_id verbatim ほか。
 const INSTRUCTIONS = [
     "Messages from a mobile client arrive as `notifications/claude/channel`",
     "with `meta.chat_id` (always present) and `meta.image_path` (when the user attached an image — read it with the Read tool if you need to inspect it).",
@@ -90,28 +84,13 @@ export interface McpServerOptions {
     images: ImageStaging;
     logger: Logger;
     onClose: () => void;
-    /**
-     * テスト時に InMemoryTransport などを差し込むための seam (省略時は StdioServerTransport)。
-     */
+    /** docs/03 §6.2.1.8: テスト用 transport seam (省略時は StdioServerTransport)。 */
     transport?: Transport;
 }
 
 export class McpServer {
     private readonly server: Server;
-    /**
-     * `notifications/claude/channel` (= deliverSend 経路) を全 chat 横断で直列化する Promise chain。
-     * image_base64 の staging が async なため、ある send の image 保存中に次の send が
-     * notification を先に届けないよう順序を担保する。同 chat 内ではなく全 channel に対する直列化。
-     *
-     * `deliverPermissionVerdict` (= notifications/claude/channel/permission) はこの queue を
-     * 通さない: permission は channel とは独立した notification 経路で、互いの順序を縛る
-     * 必要が無いため。
-     *
-     * **メモリ安全性**: `deliverSend` 毎に `this.writeQueue = this.writeQueue.then(...)` で
-     * 置換するが、解決済み Promise の `then` callback は microtask 完了後に GC 対象になる。
-     * Promise chain が「N 回呼ばれたら深さ N の参照グラフが残る」わけではない (V8 は
-     * 解決済み prior Promise の参照を保持しない) ので、長時間動かしてもメモリは伸びない。
-     */
+    /** docs/03 §6.2.1.4: deliverSend を全 chat 横断で直列化 (image staging async race 対策)。 */
     private writeQueue: Promise<void> = Promise.resolve();
 
     constructor(private readonly opts: McpServerOptions) {
@@ -119,10 +98,7 @@ export class McpServer {
             { name: SERVER_NAME, version: SERVER_VERSION },
             {
                 capabilities: {
-                    // `experimental.claude/channel*` は MCP 公式仕様には無い custom capability。
-                    // Claude Code 側がこの 2 つを discover した場合に、対応する
-                    // `notifications/claude/channel{,/permission,/permission_request,/permission_abort}`
-                    // method を listen / emit してくれる前提。
+                    // docs/03 §6.2.1.2: MCP 公式仕様外の custom capability。Claude Code が discover した場合のみ有効化。
                     experimental: {
                         "claude/channel": {},
                         "claude/channel/permission": {},
@@ -136,8 +112,7 @@ export class McpServer {
     }
 
     async start(): Promise<void> {
-        // onclose は connect() の前に設定する。await 中に transport が close を発火しても
-        // 取りこぼさないようにするため (P1-2)。
+        // docs/03 §6.2.1.5: onclose は connect() の await より前に張る (P1-2)。
         this.server.onclose = () => {
             this.opts.logger.info("mcp_closed");
             this.opts.onClose();
@@ -155,7 +130,6 @@ export class McpServer {
         }
     }
 
-    /** Hub の SendMessage を Claude へ通知。画像があれば staging してから。 */
     deliverSend(msg: SendMessage): void {
         this.writeQueue = this.writeQueue.then(async () => {
             const meta: Record<string, string> = {
@@ -166,8 +140,10 @@ export class McpServer {
             if (msg.image_base64 && msg.image_mime) {
                 try {
                     meta.image_path = await this.opts.images.save(msg.image_base64, msg.image_mime);
+                    // docs/03 §6.2.1.7: empty text + image は "(image)" で埋めて Claude の読み飛ばし防止。
                     if (content.length === 0) content = "(image)";
                 } catch (err) {
+                    // docs/03 §6.2.1.7: staging 失敗時は text-only で継続。
                     this.opts.logger.warn("image_save_failed", {
                         chat_id: msg.chat_id,
                         mime: msg.image_mime,
@@ -180,6 +156,7 @@ export class McpServer {
     }
 
     deliverPermissionVerdict(msg: PermissionVerdictMessage): void {
+        // docs/03 §6.2.1.4: permission は writeQueue を通さない (channel と独立経路)。
         void this.notify("notifications/claude/channel/permission", {
             request_id: msg.request_id,
             behavior: msg.behavior,
@@ -198,7 +175,7 @@ export class McpServer {
             const args = ReplyArgs.parse(req.params.arguments);
             const ok = this.opts.hub.sendReply(args.chat_id, args.text);
             if (!ok) {
-                // Hub と切れている時に成功を返すと Claude 側で「届いた」と誤認するので isError (P2-8)。
+                // docs/03 §6.2.1.6: Hub 切断中は isError で返す (Claude の誤認再送防止、P2-8)。
                 this.opts.logger.warn("reply_drop_no_hub", { chat_id: args.chat_id });
                 return {
                     isError: true,

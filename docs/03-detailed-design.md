@@ -3123,54 +3123,166 @@ bridge/
 
 #### 6.2.1 `McpServer`
 
-- Claude Code から stdio で MCP プロトコルを受ける
-- `reply` tool を提供
-- permission notification を受信、Hub に転送
-- channel message を受信、Hub に転送
+Claude Code 側との stdio MCP server。Phone→Claude の送り (Hub → Bridge → Claude)
+と Claude→Phone の返し (Claude → Bridge → Hub) を仲介し、permission の双方向 forward
+を担う:
+
+- tool: `reply(chat_id, text)` — Claude が呼ぶ → Hub に reply 転送
+- 受信 notification: `notifications/claude/channel/permission_request` (Claude → Bridge)
+  → Hub に permission 転送
+- 受信 notification: `notifications/claude/channel/permission_abort` (Claude → Bridge)
+  → Hub に permission_abort 転送
+- 送出 notification: `notifications/claude/channel` (Bridge → Claude) — Hub の send を
+  staging 後 (画像があれば `meta.image_path` 付与)
+- 送出 notification: `notifications/claude/channel/permission` (Bridge → Claude) —
+  Hub からの permission_verdict
+
+##### 6.2.1.1 stdout は MCP プロトコル専有
+
+Claude Code との stdio MCP は stdout を NDJSON で占有する。**`console.log` は絶対に
+使わない** (1 byte でも混ざると MCP framing が壊れて Claude が disconnect する)。
+`StructuredLog` は stderr 一本に固定。これは Bridge コード全体 (HubClient / SessionDetector
+/ ImageStaging も含む) に効く invariant で、ログ出力経路はすべて Logger 経由のみ。
+
+##### 6.2.1.2 capabilities と Claude への INSTRUCTIONS
+
+`capabilities.experimental` に `claude/channel` と `claude/channel/permission` の 2 つを
+declare する。これは MCP 公式仕様には**無い** custom capability で、Claude Code 側が
+この 2 つを discover した場合に対応する `notifications/claude/channel{,/permission,
+/permission_request,/permission_abort}` method を listen / emit してくれる前提
+(`--dangerously-load-development-channels server:channel` flag で gate される、§9.3.2)。
+
+server 初期化時に `instructions` を渡し、Claude に「`reply` tool を使え / `chat_id` は
+inbound meta を verbatim で / `notifications/claude/channel*` を自分から emit するな /
+permission notification は過去の tool call の verdict」を明示する。`instructions` は
+Claude が conversation context として常に参照するので、INSTRUCTIONS の表現が channel
+プロトコルの user-facing contract になる。
+
+##### 6.2.1.3 SERVER_VERSION は `package.json` 経由 (P3-1)
+
+server name/version の version は `import.meta.url` 基準で `../package.json` を sync
+read し、JSON parse して `version` を取り出す。文字列リテラルで書くと bridge 側のパッケージ
+版数と二重管理になり、リリースのたびに乖離する。読めなかった場合は `"0.0.0"` に fallback
+(Claude Code 側で version 検証は厳格でないため致命的でない)。
+
+##### 6.2.1.4 `writeQueue` で `deliverSend` を全 chat 直列化
+
+`writeQueue: Promise<void>` を chain する形で `deliverSend` を **全 chat 横断で直列化**
+する。理由: `image_base64` の staging が `async` (file write) なため、ある send の
+image 保存中に次の send の notification が先に飛ぶと Claude 側で順序が逆転する
+(meta.image_path 待ちのテキストが、後続の image なし send より遅れて届く)。`then` で
+連鎖させることで、各 send 内の `await images.save()` 〜 `await notify()` が直列化される。
+
+- スコープ: `notifications/claude/channel` (= deliverSend) のみ
+- 通さない: `deliverPermissionVerdict` (= `notifications/claude/channel/permission`)。
+  permission は channel と独立した notification 経路で、互いの順序を縛る必要がない
+- メモリ安全性: `this.writeQueue = this.writeQueue.then(...)` で chain を更新するが、
+  V8 は resolved Promise の prior 参照を保持しないので、N 回 chain しても深さ N の
+  参照グラフは残らず GC される (= 長時間稼動でメモリは伸びない)
+
+##### 6.2.1.5 `onclose` は `connect()` の前に張る (P1-2)
+
+`server.onclose` の代入は `await server.connect(transport)` より**前**にやる。`connect()`
+の `await` 中に transport が `close` を発火しても取りこぼさないため。順序を逆にすると
+stdio が即時 close するケース (parent kill / pipe closed) で `onClose` callback が
+呼ばれず Bridge が hang する。
+
+##### 6.2.1.6 `reply` 失敗時の `isError` 返却 (P2-8)
+
+Hub と切断中に `reply` tool が呼ばれた場合、`HubClient.sendReply` は `false` を返す。
+このとき MCP の `CallToolResult` を `{ isError: true, content: [{ type: "text", text:
+"hub disconnected; reply dropped" }] }` で返す。`isError: false` の通常返却にすると
+Claude 側で「届いた」と誤認して再送しないため。
+
+##### 6.2.1.7 image_path / 空 content の fallback ルール
+
+`deliverSend` の image 取り扱いで 2 種類の fallback が並走する:
+
+1. **staging 成功 + 空 text → `content = "(image)"`**: empty text + image のケースで
+   Claude が「空 content notification」を読み飛ばすのを防ぐため、`(image)` の placeholder
+   を埋める。Claude 側で `meta.image_path` だけ読んでも使えるよう、最低限の text を
+   保証する。
+2. **staging 失敗 → text-only で継続**: `images.save(base64, mime)` が throw した場合
+   (未対応 MIME / disk full 等) は warn ログを吐いて image 抜きで notification を継続
+   する。text + image の組み合わせを「image なしでも text は届ける」優先順位に倒して
+   いる (会話全体が止まるよりは degraded delivery)。
+
+##### 6.2.1.8 transport seam
+
+`McpServerOptions.transport` で `Transport` を差し込める。テスト時 (`bridge/test/mcp-server.
+test.ts`) に `InMemoryTransport` を差し、stdio を介さず in-process で notification flow
+を検証する目的。default は `StdioServerTransport` (本番経路)。
 
 #### 6.2.2 `HubClient` (register / ack 待ち、§1.3 D-中 対応)
 
-```typescript
-class HubClient {
-    private socket: net.Socket | null = null;
-    private registered = false;
-    private outgoingQueue: BridgeWireMessage[] = [];
+Hub の `BridgeServer` への TCP NDJSON クライアント (port 8787 / loopback)。接続後の
+最初の write は必ず `register`、Hub の `ack_register` 返信までは他の send / permission
+/ permission_abort を `outgoingQueue` に積み、ack 到着で順送 flush する。
 
-    async connect(host: string, port: number, sessionId: string): Promise<void> {
-        this.socket = net.connect(port, host);
-        this.socket.on('data', this.onData.bind(this));
-        this.socket.on('close', this.onClose.bind(this));
-        await this.send({ type: 'register', session_id: sessionId, pid: process.pid });
-        // ack を待つまで他のメッセージは queue
-    }
+##### 6.2.2.1 NDJSON over loopback TCP
 
-    async sendReply(chatId: string, sessionId: string, text: string): Promise<void> {
-        const msg: ReplyMessage = { type: 'reply', chat_id: chatId, session_id: sessionId, text };
-        if (this.registered) {
-            await this.send(msg);
-        } else {
-            this.outgoingQueue.push(msg);
-        }
-    }
+socket は `node:net` で 127.0.0.1:8787 (host 既定) に connect。受信は `readline.
+createInterface({ input: socket })` で行単位、各行を `JSON.parse` → `HubToBridgeMessage`
+として処理。送信は `JSON.stringify(msg) + "\n"` の一行を `socket.write`。
 
-    private onData(buf: Buffer): void {
-        // NDJSON parse
-        for (const line of buf.toString().split('\n')) {
-            if (!line.trim()) continue;
-            const msg = JSON.parse(line);
-            if (msg.type === 'ack_register') {
-                this.registered = true;
-                // queue flush
-                for (const queued of this.outgoingQueue) {
-                    this.send(queued);
-                }
-                this.outgoingQueue = [];
-            }
-            // ...
-        }
-    }
-}
-```
+##### 6.2.2.2 register-then-queue (D-中 race 対策)
+
+`connect()` の Promise は `register` の **write 完了** で resolve する (`ack_register`
+は待たない)。Bridge は `connect().then(...)` の中で即 `reply` などを呼ぶ可能性があり、
+ack 待ち blocking は Bridge の起動 latency に直接乗るため避ける。代わりに ack 到着前の
+write は `outgoingQueue` に積み、`handleLine` で `ack_register` を受けた瞬間に
+`flushQueue` で順送する。
+
+##### 6.2.2.3 socket error handler を先張りする (P3-5)
+
+`createConnection` の戻り値 socket に対して、`once("connect")` / `once("error")` で
+connect 結果を待つ前に、**先に** `sock.on("error", ...)` と `sock.on("close", ...)` の
+**永続** handler を張る。`once("error")` を await 終了で外したあとに来た error が
+unhandled になり、Node が `Error: read ECONNRESET` を throw して process crash させる
+事故を避ける目的。
+
+##### 6.2.2.4 register write 失敗 → `connect()` 自体を fail (P1-3)
+
+`writeRegisterNow` が `false` を返した (socket destroyed / 同期 throw) 場合、
+`connect()` は `close()` してから `Error("register write failed immediately after
+connect")` を throw する。`writeRegisterNow` が true でも backpressure が起きていれば
+warn ログだけ吐いて成功扱い (kernel buffer に乗ったかは確認できているため)。`ack_register`
+が Hub から戻るかは別経路の watchdog 余地として残す (Phase 5 拡張)。
+
+##### 6.2.2.5 `sessionId` は HubClient が抱える (P2-6)
+
+Bridge は **1 プロセス = 1 session** なので、`opts.sessionId` を constructor で受けて
+HubClient 内部に保持する。`sendReply(chatId, text)` のように呼び出し側は session_id を
+再渡ししない (sessionId を毎回引数で受けると、誤って違う session_id を混ぜる事故が
+1 行のミスで起きる、§3.2.5.4 と同じ「ハンドル抱え持ち」パターン)。
+
+##### 6.2.2.6 `onClose` の `remote` / `local` 弁別
+
+socket `close` event のハンドラ `onClose()` は、`this.closed` flag を見て disconnect
+原因を `"local"` (= `close()` が呼ばれた = Bridge 側で `shutdown` を発火した) /
+`"remote"` (= Hub 側 TCP 切断) に分類して callback に渡す。Bridge `index.ts` 側で
+`remote` を受けたら `shutdown("hub_remote_close")` で自殺する (§5.3 と対)。
+
+##### 6.2.2.7 exhaustive `never` で wire 型 drift をコンパイル時検出
+
+`handleLine` の `switch (msg.type)` 末尾で `const _exhaust: never = msg;` を入れて、
+`HubToBridgeMessage` union に新しい variant が増えたら TypeScript がコンパイル時に拒否
+するよう型レベルで縛る。`HubWire.ts` の型定義に手を入れた瞬間ここが赤くなるので、
+ハンドラ追加の漏れが build で止まる (= 設計と実装の drift を機械検出)。
+
+##### 6.2.2.8 `send*` メソッドの boolean 戻り値契約
+
+`sendReply` / `sendPermission` / `sendPermissionAbort` の `boolean` 戻り値は以下の意味:
+
+| 戻り値 | 意味 | 経路 |
+|---|---|---|
+| `true` | ack 後なら write 成功 (kernel buffer 到達)、ack 前なら queue 積み成功 | `writeNow` true / `enqueueOrSend` の queue path |
+| `false` | socket 不在 (`closed === true` or `socket === null`) で drop | `enqueueOrSend` の `no_socket` 分岐 / `writeNow` の destroyed 判定 |
+
+呼び出し側は `false` を受けたら caller のレイヤで握る (例: §6.2.1.6 `reply` tool で
+`isError` を返して Claude に伝える)。backpressure (`!sock.write()` の戻り false) は
+`true` 扱い + warn ログ — kernel buffer には乗っているため drop ではない。`writeFailed`
+の例外 path も `false` に倒す (write 系の sync throw 経路)。
 
 #### 6.2.3 `SessionDetector` (Phase 4 改訂: env injection 方式)
 

@@ -1,8 +1,4 @@
-// Hub への TCP NDJSON 接続。Phase 3 §6.2.2 / §1.3 D-中。
-//
-// 接続成立後、`register` を最初に送る。Hub から `ack_register` が返るまでは
-// 他のメッセージ (reply / permission / permission_abort) は outgoingQueue に積み、
-// ack 到着後に順送で flush する (D-中 race 対策)。
+// docs/03 §6.2.2: Hub への TCP NDJSON クライアント。§1.3 D-中 (register-then-queue) 対応。
 
 import { createConnection, type Socket } from "node:net";
 import { createInterface } from "node:readline";
@@ -40,14 +36,10 @@ export class HubClient {
 
     constructor(private readonly opts: HubClientOptions) {}
 
-    /**
-     * Hub に接続して `register` を送る。Promise は `register` の write 完了で resolve するが、
-     * `ack_register` を待たない。ack 前に来た send/permission は呼び出し側で queue。
-     */
+    /** docs/03 §6.2.2.2: `register` の write 完了で resolve (ack_register は待たない)。 */
     async connect(): Promise<void> {
         const sock = createConnection({ host: this.opts.host, port: this.opts.port });
-        // socket "error" は connect 前後で発火し得るので、`once("connect")` より先に on() を張る
-        // (P3-5: once解除 → 未登録の隙間で error → Unhandled error throw を避ける)。
+        // docs/03 §6.2.2.3: once("connect")/once("error") より先に永続 handler を張る (P3-5)。
         sock.on("error", (err) => this.opts.logger.warn("socket_error", { error: err.message }));
         sock.on("close", () => this.onClose());
         await new Promise<void>((resolve, reject) => {
@@ -68,9 +60,7 @@ export class HubClient {
         const rl = createInterface({ input: sock });
         rl.on("line", (line) => this.handleLine(line));
 
-        // register write 失敗時は connect() を fail させる (P1-3)。
-        // writeNow が false を返すケース = socket destroyed / 同期 throw。
-        // backpressure はここでは true を返す側に倒している (true でも warn ログは出る)。
+        // docs/03 §6.2.2.4: register write 失敗 → connect() 自体を fail (P1-3)。
         const ok = this.writeRegisterNow();
         if (!ok) {
             this.close();
@@ -78,10 +68,6 @@ export class HubClient {
         }
     }
 
-    /**
-     * `register` だけは callback で実際の送出を確認したい (kernel buffer に乗ったかは確認可能、
-     * Hub が受信して ack を返すかは別経路で watchdog する設計余地あり)。今は sync の write 結果で判定。
-     */
     private writeRegisterNow(): boolean {
         return this.writeNow({
             type: "register",
@@ -90,11 +76,7 @@ export class HubClient {
         });
     }
 
-    /**
-     * 戻り値: 送信を queue or write できた場合 true、socket が無く drop した場合 false。
-     * Bridge は 1 プロセス = 1 session なので session_id は HubClient が抱え持つ
-     * (`opts.sessionId`)。呼び出し側で再渡しは不要 (P2-6)。
-     */
+    // docs/03 §6.2.2.5: sessionId は HubClient 内蔵 (P2-6)。戻り値契約は §6.2.2.8。
     sendReply(chatId: string, text: string): boolean {
         const msg: ReplyMessage = {
             type: "reply",
@@ -196,6 +178,7 @@ export class HubClient {
                 this.opts.callbacks.onPermissionVerdict(msg);
                 return;
             default: {
+                // docs/03 §6.2.2.7: union に variant が増えたらコンパイル時に拒否させる exhaustive guard。
                 const _exhaust: never = msg;
                 void _exhaust;
                 this.opts.logger.warn("unknown_message", { line_head: trimmed.slice(0, 80) });
@@ -205,6 +188,7 @@ export class HubClient {
     }
 
     private onClose(): void {
+        // docs/03 §6.2.2.6: close() 経由なら local、それ以外は Hub からの切断 = remote。
         const reason: "remote" | "local" = this.closed ? "local" : "remote";
         this.opts.logger.info("disconnected", { reason });
         this.socket = null;
