@@ -14,15 +14,8 @@ import com.example.claudemobilehud.phone.PhoneApplication
 import com.example.claudemobilehud.phone.log.StructuredLog
 
 /**
- * Phase 3 §3.3.4 の Mic FGS-microphone。
- *
- * `AppLifecycleController.startGlassSession` 経由でしか起動しない (FGS 同士の直接
- * 結合を避けるため、外向き API は提供しない)。FGS 操作はすべて
- * AppLifecycleController → FgsOperations を経由する。
- *
- * 役割は AudioRecord を OS から確保し続けるために
- * `FOREGROUND_SERVICE_TYPE_MICROPHONE` の通知を立てておくだけ。実際の
- * AudioRecord 駆動は **4b2 の `MicCapture`** が `InputController` 経由で行う。
+ * Mic FGS-microphone (docs/03 §3.3.4)。onCreate の eligibility 二重ガード (§3.3.4.1、
+ * §3.3.6.4 第一防衛線の補完) と START_NOT_STICKY 選択理由 (§3.3.4.2) を参照。
  */
 class MicForegroundService : Service() {
     private val log = StructuredLog("channel.mic")
@@ -31,13 +24,7 @@ class MicForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // Android 14+ の FGS-microphone hardening (targetSDK=36 で更に厳格): RECORD_AUDIO
-        // runtime 権限取得済み + app が foreground (STARTED 以上) でなければ
-        // `startForeground(MICROPHONE)` は SecurityException で死ぬ。事前に GlassDialog
-        // で grant を取る運用にしているが、OS triggered restart や mid-session の
-        // 権限 revoke 等の edge case で onCreate が走るケースを **defensive に潰す**
-        // (起動側 `PhoneApplication.fgsOps.startMicFgs` でも同じ eligibility 判定を
-        // しているが、こちらは double-defense として残す)。
+        // docs/03 §3.3.4.1: 第二防衛線。OS restart / 権限 revoke / dispatcher regression 対策。
         val granted = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECORD_AUDIO,
@@ -67,7 +54,6 @@ class MicForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_NOT_STICKY
 
     private fun notifyLifecycle(event: AppLifecycleController.FgsLifecycle) {
-        // P2-5: GlassConnectionService と同じ理由で error log。詳細はそちら参照。
         val app = applicationContext as? PhoneApplication
         if (app?.containerOrNull == null) {
             log.error(

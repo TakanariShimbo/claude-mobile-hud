@@ -6,25 +6,10 @@ import com.rokid.cxr.Caps
 import kotlinx.serialization.json.Json
 
 /**
- * Phase 3 §2.5 の `CapsFactory` を Glass 側 (cxr-service-bridge の `Caps`) で実装する。
- *
- * **Phone 側 `phone/...glass/CapsFactoryImpl.kt` との等価性が必須**:
- *   - 同じ Caps envelope (`["json"] [JSON 文字列]`) を使う
- *   - 同じ Json 設定 (`classDiscriminator = "event"`, `encodeDefaults = false`,
- *     `explicitNulls = false`)
- *   これらが揃わないと Phone↔Glass で wire の polymorphic discriminator が drift し、
- *   片側だけで decode に成功する状況が発生する。
- *
- * 重複コード問題 (Phone と同じ実装が 2 か所に居る) は意図的に未抽出:
- *   - 共通モジュール (e.g. :cxrcommon) を切ると `com.rokid.cxr.Caps` 依存が
- *     Phone/Glass の両 SDK (client-l / cxr-service-bridge) に流れて重複クラスの
- *     衝突を AGP が検知する。
- *   - 二重定義のリスクは小さく (Phone/Glass で wire 仕様が分岐したら CI で codec
- *     parity テストが落ちる)、いま抽出する利益が薄い。
- *
- * **decode 防御**: Rokid Caps の `Value.getString()` は型不整合時に
- * `Caps$IncorrectTypeException` を投げるため、全 decode 経路を `runCatching` で
- * くるみ binder callback を crash させない (Phone 側 P1-3 と同じ方針)。
+ * Glass-side `CapsFactory` 実装 (docs/03 §2.5 / §2.5.2)。Phone-side との等価性は §2.5.2.1、
+ * Caps fast-path (`encodeToCaps` / `decodeFromCaps`) は §2.5.1 / §2.5.1.1、`runCatching`
+ * による decode 防御 (`MsgCallback.onReceive` binder callback の crash 回避) は §2.5.2.3
+ * を参照 (Phone-side P1-3 と同根防御)。
  */
 class CapsFactoryImpl(
     private val json: Json = Json {
@@ -37,11 +22,7 @@ class CapsFactoryImpl(
 
     override fun encode(event: WireEvent): ByteArray = encodeToCaps(event).serialize()
 
-    /**
-     * Glass 側送信経路は `CXRServiceBridge.sendMessage(channel, Caps)` を取るので、
-     * bytes へ落としてから再 parse すると無駄が出る。直接 [Caps] を返す API を
-     * 提供して送信経路で使う。
-     */
+    /** docs/03 §2.5.1.1: 送信側 fast-path。`CXRServiceBridge.sendMessage(channel, Caps)` 直渡し用。 */
     fun encodeToCaps(event: WireEvent): Caps {
         val payload = json.encodeToString(WireEvent.serializer(), event)
         val caps = Caps()
@@ -55,13 +36,7 @@ class CapsFactoryImpl(
         decodeFromCaps(caps)
     }.getOrNull()
 
-    /**
-     * Caps を直接受け取って WireEvent に decode する。Glass 側受信経路の
-     * `CXRServiceBridge.MsgCallback.onReceive(name, args: Caps?, bytes: ByteArray?)` は
-     * **`bytes` を常に null で渡し、ペイロードは `args` (Caps) に入れて届ける** (実機確認済)。
-     * `decode(ByteArray)` で受けると bytes が null で silent drop されて Phone↔Glass の wire
-     * が一切 dispatch されない (Phase 4 step 5b 実機テストで本症状を踏んだ)。
-     */
+    /** docs/03 §2.5.1: 受信側 fast-path。Glass-side onReceive は bytes=null / args=Caps で来る。 */
     fun decodeFromCaps(caps: Caps): WireEvent? = runCatching {
         if (caps.size() < 2) return@runCatching null
         val keyValue = caps.at(0) ?: return@runCatching null

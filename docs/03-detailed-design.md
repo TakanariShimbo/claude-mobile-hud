@@ -367,6 +367,17 @@ Phase 4 で「`:protocol` の bytes seam に揃える」リファクタを入れ
 事故があった (Phase 4 の commit `576f597` で修正)。fast-path は `args` を直接読むので、
 bytes 経路と並行で維持する必要がある。
 
+##### 2.5.1.1 `encodeToCaps` (送信側 fast-path)
+
+decode と対称に、**送信側にも Caps 直渡し fast-path** を持たせる:
+
+```kotlin
+fun encodeToCaps(event: WireEvent): Caps   // Glass-side のみ
+override fun encode(event: WireEvent): ByteArray = encodeToCaps(event).serialize()
+```
+
+Glass-side 送信経路は `CXRServiceBridge.sendMessage(channel, Caps)` を取るので、`bytes` に落としてから再 parse すると無駄が出る。`encodeToCaps` を介して `Caps` を直接返し、`GlassBridge` の送信側はそれをそのまま `sendMessage` に渡す。`encode(ByteArray)` (`CapsFactory` interface) は bytes 経路 (test / Phone-side 送信) のために残す。
+
 #### 2.5.2 `CapsFactoryImpl` (Phone-side encoding format)
 
 Phone → Glass の wire encoding は Rokid CXR `Caps` を **2-slot envelope** として使う:
@@ -411,6 +422,8 @@ if (keyValue.string != KEY_JSON) return@runCatching null
 ```
 
 不正 payload は `null` 戻しになり、上位 `GlassConnectionService` 側で `glass_drop_unknown_payload` warn ログ 1 行で吸収する (§3.3.3.6)。
+
+**Glass-side `decodeFromCaps` (§2.5.1) も同根の防御**: `MsgCallback.onReceive` も binder callback なので、Caps fast-path 経路で同じ `runCatching` を維持する。Phone↔Glass どちらの受信側でも malformed payload で binder thread を死なせない契約。
 
 ### 2.6 双方向 parity test
 
@@ -1428,6 +1441,34 @@ override fun onDestroy() {
 #### 3.3.4 `MicForegroundService`
 
 `AppLifecycleController` 経由でのみ叩かれる。companion からは start/stop は提供せず、`AppLifecycleController.startGlassSession` のみがトリガ。onCreate / onDestroy で `onFgsLifecycle(MIC, ...)` を呼ぶ。
+
+**役割**: `AudioRecord` を OS から確保し続けるために `FOREGROUND_SERVICE_TYPE_MICROPHONE` の通知を立てておくだけ。実際の `AudioRecord` 駆動は `InputController` 経由の `MicCapture` が行う。
+
+##### 3.3.4.1 onCreate の eligibility 二重ガード (defensive)
+
+§3.3.6.4 で説明した RealFgsOperations 側 eligibility 判定 (第一防衛線) に加えて、`MicForegroundService.onCreate` でも同じ判定を行う **第二防衛線**:
+
+```kotlin
+if (!RECORD_AUDIO granted) { stopSelf(); return }
+if (!ProcessLifecycleOwner is STARTED) { stopSelf(); return }
+startForegroundCompat()
+```
+
+第二防衛線が必要な edge case:
+- **OS triggered restart**: `START_NOT_STICKY` を返しているが、OS が他経路で Service を立ち上げてしまう可能性
+- **mid-session の権限 revoke**: 録音中にユーザが Settings から権限を取り消す
+- **dispatcher 側のバグ**: 第一防衛線が将来 regression したときの fallback
+
+不適合なら `stopSelf()` で即停止し、`startForeground(MICROPHONE)` を呼ばないことで `SecurityException` / `ForegroundServiceDidNotStartInTimeException` を回避する。
+
+##### 3.3.4.2 `onStartCommand = START_NOT_STICKY`
+
+`ChannelService` / `GlassConnectionService` と違い、`MicForegroundService` は **OS kill 後 redeliver しない**。Mic FGS は Glass session の伴走 lifecycle (= `Stopping` で必ず stop される) なので、独立に再起動すると state machine の前提が崩れる (§3.3.1)。AppLifecycleController から明示的に再 start させる経路に倒す。
+
+対比:
+- `ChannelService` (`START_STICKY`): SSE 接続を OS に委ねて長命に維持。再起動経路でも Repository / 通知の再 init は idempotent (§3.3.2.2)
+- `GlassConnectionService` (`START_STICKY`): CXR-L token を `TokenStore` から再読込して接続復帰 (§3.3.3.7)
+- `MicForegroundService` (`START_NOT_STICKY`): 独立再起動の意味が無い (Glass session 不在で mic を確保しても無駄)。AppLifecycleController が deterministic に再 start する
 
 #### 3.3.5 `VerdictDispatchService` (FGS 化、Rev 2 修正、AD-16)
 
