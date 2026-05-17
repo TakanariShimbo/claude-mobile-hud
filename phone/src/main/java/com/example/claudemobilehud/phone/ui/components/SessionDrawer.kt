@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.claudemobilehud.phone.data.model.SessionSummary
 
+/** docs/03 §3.5.1.14: ModalDrawerSheet + LazyColumn(NavigationDrawerItem)。active 丸 + badge slot に delete。 */
 @Composable
 fun SessionDrawer(
     sessions: List<SessionSummary>,
@@ -90,10 +91,7 @@ private fun SessionRow(
                     )
                     Spacer(Modifier.width(6.dp))
                 }
-                // P3-B of 4c2 review: SessionSummary.label を直接使う (SessionStore で
-                // id.take(8) として既に計算済み)。Glass 向け wire payload と
-                // 同じ値で UI を描画することで「Phone と Glass で見えるラベルが違う」
-                // ズレを防ぐ。
+                // docs/03 §3.5.1.14: SessionSummary.label を直接使う (Phone/Glass parity, P3-B)。
                 Text(
                     "${session.label}  ·  ${session.messageCount} msg",
                     style = MaterialTheme.typography.bodyMedium,

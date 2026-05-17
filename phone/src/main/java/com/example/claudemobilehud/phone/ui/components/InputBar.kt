@@ -33,12 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.example.claudemobilehud.phone.data.model.ImageAttachment
 import com.example.claudemobilehud.phone.ui.util.rememberImageBitmapFromPath
 
-/**
- * 入力欄 + ツールバー (画像添付 / マイク / 送信)。Phase 3 §3.5。
- *
- * `pendingImage` が非 null のとき先頭に添付プレビュー行を出す。送信中 (`sending`)
- * は全 IconButton を disable して二重送信を防ぐ。
- */
+/** docs/03 §3.5.1.13: 入力欄 + 画像 / マイク / 送信。enabled gate / マイク存在 gate / pendingImage プレビュー。 */
 @Composable
 fun InputBar(
     value: String,

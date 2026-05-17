@@ -1021,6 +1021,52 @@ class SessionStore(private val historyStore: HistoryStore) {
 
 `messagesBySession: MutableMap<String, MutableList<ChatMessage>>` を Mutex 保護下で操作する。
 
+##### 3.2.3.1 `UNKNOWN_SESSION_ID` sentinel (FR-PH-55, P3-4)
+
+「Phone send → reply 受信前」の暫定置き場として固定文字列 `" __pending__"`
+(先頭 NUL バイト + `__pending__`) を使う。Hub 側 session_id は UUID v4 のため、先頭
+NUL を含む文字列とは **値が衝突しない** ことが保証される (P3-4)。Hub から `chat_id` 付き reply が到着した時点で
+`mergeUnknownSession(chatId, confirmedSessionId)` で正規 session へ転送する (FR-PH-55)。
+
+##### 3.2.3.2 二重 Mutex (state + persist) と debounce 永続化
+
+| Mutex | 守る対象 |
+|---|---|
+| `mutex` | `messagesBySession` / `activeSessionIds` / `currentSessionId` / `nextMessageId` (内部 state) |
+| `persistMutex` | `historyStore.save()` 呼び出しの直列化 |
+
+**500 ms debounce save (P2-4)**: `schedulePersist()` は前の `saveJob` を cancel して
+新たに schedule する。`send` / `reply` 連発で毎度 save が走るのを防ぎ、最終状態だけ
+disk に書く。debounce delay 中に shutdown が来た場合は `flush()` が `saveJob.
+cancelAndJoin()` → `persistMutex.withLock { save() }` で **即時保存** に倒す。
+
+##### 3.2.3.3 `applyReply` の atomic merge (P2-1)
+
+Hub reply 受信時の処理は **1 つの mutex 配下で**:
+
+1. `mergeUnknownSessionLocked(chatId, sessionId)` — UNKNOWN 置き場から該当 chat_id の
+   メッセージを正規 session に移動
+2. `appendLocked(INCOMING, sessionId, chatId, text)` — reply text を append
+3. `rebuildSnapshot()` — UI 用 Snapshot を再計算
+4. mutex 解放後に `schedulePersist()` 1 回だけ
+
+旧設計は各操作で別々に mutex を取り persist を 3 回 schedule していたため、SSE で
+reply が連続するとカクつきが出ていた。1 mutex / 1 persist に集約 (P2-1)。
+
+##### 3.2.3.4 `Snapshot` の rebuild 戦略
+
+`rebuildSnapshot()` は **mutex 保護下で同期計算**:
+
+- `sessionIds` = `activeSessionIds` ∪ `messagesBySession.keys` (UNKNOWN を除く) を
+  insertion order 保持の LinkedHashSet で順序確定
+- `SessionSummary` を `id.take(8)` でラベル化 + `messageCount` / `isActive` を含めて
+  生成 (Glass 向け wire payload と **同じ計算式** にして表示ずれを防ぐ、P3-B)
+- `currentSessionId` 配下のメッセージ list を `messages` フィールドに展開
+- `_snapshot.value = new Snapshot(...)` で StateFlow を atomic に swap
+
+UI 側 (`ChatViewModel.uiState`) は Snapshot 1 つを観測すれば良く、各 collection を
+個別に observe する複雑さを背負わない。
+
 #### 3.2.4 `ConnectionController` (exp backoff state machine、Rev 2 修正)
 
 ```kotlin
@@ -2355,6 +2401,38 @@ Failed(reason) / AuthFailed` の 5 状態に対応:
 8 dp の色付き丸 + label を Row で並べる minimal な status indicator。`AuthFailed` を
 `Failed` と別色 / 別 label にしないのは設計判断 (どちらも attention を引きたいので
 error 色で揃える、対応は §3.6.5.5 で UI gate される)。
+
+##### 3.5.1.13 `InputBar` (入力欄 + 画像 / マイク / 送信)
+
+`OutlinedTextField` + 3 つの `IconButton` (画像添付 / マイク / 送信) を `Row` で組む。
+
+**`enabled` gate**: `enabled = false` (= `Settings` 未設定 / `AuthFailed`) のとき全
+button を disable + placeholder を「先に設定を開いてください」に切り替え。送信は
+`value.isNotBlank() || pendingImage != null` の **OR 条件** で active (= 画像だけ送る
+ケースを許す、§6.2.1.7 で `(image)` placeholder に化ける)。
+
+**マイク button の存在 gate**: `micAvailable: Boolean` が false のとき (Glass 接続が
+無い / RECORD_AUDIO 拒否) は **マイクアイコン自体を出さない** (disable で表示するより
+UI が読みやすい)。`micActive == true` のとき `Stop` icon + error 色で「録音中」を表示。
+
+**`pendingImage` プレビュー行**: 非 null なら先頭に `AttachmentPreview` (56 dp サムネ
++ MIME ラベル + × ボタン) を出す。`rememberImageBitmapFromPath` (§3.5.1.10) で
+bitmap decode を Composition cache。
+
+##### 3.5.1.14 `SessionDrawer` (session 一覧 + delete)
+
+`ModalDrawerSheet` 内に `LazyColumn(items = sessions, key = { it.id })` で各 session
+を `NavigationDrawerItem` として描画。`isActive == true` の session は label 先頭に
+緑色の 8dp 丸を出して「動いてる」ことを示す。
+
+**`SessionSummary.label` を直接使う (P3-B 4c2 review)**: `id.take(8)` 等を UI 側で
+再計算しない。`SessionStore.rebuildSnapshot()` (§3.2.3.4) で計算済の `label` を直接
+表示することで、Phone と Glass の wire payload で見えるラベルが**同じ計算式**から
+出る契約を保つ (= drawer ↔ TopBar / Phone ↔ Glass のずれを防ぐ)。
+
+**delete button は badge slot に**: `NavigationDrawerItem.badge` slot に 🗑 icon
+button を埋めて「行を tap」と「delete」を分離。tap で session 切替、delete で
+`pendingDeleteSessionId` を上げて `DeleteSessionDialog` を出す (§3.5.1.9 経路)。
 
 #### 3.5.2 `ChatViewModel`
 

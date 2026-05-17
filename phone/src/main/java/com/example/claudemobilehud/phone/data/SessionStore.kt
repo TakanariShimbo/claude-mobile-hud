@@ -19,18 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
-/**
- * Phone-local の session / メッセージ集約。Phase 3 §3.2.3。
- *
- * - `messagesBySession`: session_id → 会話履歴 (Mutex 保護)
- * - 特殊な session_id `UNKNOWN_SESSION_ID` は「Phone send → reply 受信前」の暫定置き場
- *   (FR-PH-55 で確定 session_id に merge する)
- * - SSE event を入れて内部状態を更新するのは [applySseEvent]
- * - 公開状態は `snapshot: StateFlow<Snapshot>` で UI が観測する
- *
- * 永続化は [HistoryStore] に委譲。各変更操作の終わりに **500ms debounce** で save を schedule
- * (P2-4: send/reply 毎の全書き換えを防ぐ)。[flush] で即時 save する (shutdown 用)。
- */
+/** docs/03 §3.2.3 / §3.2.3.1〜.4: Phone-local session 集約。Mutex 保護 / UNKNOWN sentinel / 500ms debounce / Snapshot StateFlow。 */
 class SessionStore(
     private val historyStore: HistoryStore,
     private val saveDebounceMs: Long = 500L,
@@ -130,10 +119,7 @@ class SessionStore(
         return msg
     }
 
-    /**
-     * Hub mint された chat_id を pending outgoing メッセージに後付け (FR-PH-55)。
-     * @return 紐づけに成功した ChatMessage (見つからなければ null)
-     */
+    /** docs/03 §3.2.3.1 / FR-PH-55: Hub mint の chat_id を pending outgoing に後付け、見つからなければ null。 */
     suspend fun assignChatIdToPending(
         localMessageId: Long,
         chatId: String,
@@ -159,10 +145,7 @@ class SessionStore(
         return removed
     }
 
-    /**
-     * Phone send → reply 受信で session_id が確定したら、UNKNOWN_SESSION_ID にあった
-     * 当該 chat_id を持つメッセージを正規 session に移す (FR-PH-55)。
-     */
+    /** docs/03 §3.2.3.1 / FR-PH-55: UNKNOWN_SESSION_ID 置き場の該当 chat_id を正規 session に転送。 */
     suspend fun mergeUnknownSession(chatId: String, confirmedSessionId: String) {
         val moved = mutex.withLock {
             val n = mergeUnknownSessionLocked(chatId, confirmedSessionId)
@@ -180,10 +163,7 @@ class SessionStore(
         }
     }
 
-    /**
-     * Hub からの SSE event を内部状態に反映。Reply は 1 つの mutex 配下で
-     * merge → append → rebuild → persist 1 回、を実現する (P2-1)。
-     */
+    /** docs/03 §3.2.3.3: SSE event を反映。Reply は 1 mutex / 1 persist に集約 (P2-1)。 */
     suspend fun applySseEvent(event: SseEvent) {
         when (event) {
             is SseEvent.Reply -> applyReply(event)
@@ -221,12 +201,8 @@ class SessionStore(
         }
     }
 
-    /**
-     * shutdown 時に呼ぶ (debounce job を bypass して即時 save)。Phase 3 §3.6.1。
-     * 進行中の save と debounce 待ちの両方を保証する。
-     */
+    /** docs/03 §3.2.3.2: shutdown 時に debounce job を bypass して即時 save (§3.6.1)。 */
     suspend fun flush() {
-        // pending debounce job を取り消して即時 save に倒す
         saveJob?.cancelAndJoin()
         saveJob = null
         persistMutex.withLock {
@@ -237,7 +213,7 @@ class SessionStore(
     // --- private: lock-aware helpers ---
 
     private suspend fun applyReply(event: SseEvent.Reply) {
-        // 1 つの mutex 配下で merge → append → rebuild、persist は 1 回だけ schedule (P2-1)
+        // docs/03 §3.2.3.3: 1 mutex 配下で merge → append → rebuild、persist は 1 回 (P2-1)。
         val touched = mutex.withLock {
             var changed = false
             if (event.sessionId != null) {
@@ -334,10 +310,7 @@ class SessionStore(
         return matching.size
     }
 
-    /**
-     * 500ms 後に save を実行。連続呼び出しは前の job を cancel して新たに schedule (debounce)。
-     * P2-4 / Phase 3 §3.6.1。
-     */
+    // docs/03 §3.2.3.2: 500ms debounce save (P2-4) — 前の job を cancel して再 schedule。
     private fun schedulePersist() {
         saveJob?.cancel()
         saveJob = persistScope.launch {
@@ -378,10 +351,7 @@ class SessionStore(
     private fun emptySnapshot() = Snapshot(emptyList(), null, emptyList())
 
     companion object {
-        /**
-         * 確定 session_id を受け取る前の暫定置き場。FR-PH-55。
-         * NUL を含むため Hub からの実 session_id (UUID v4) と衝突しない (P3-4)。
-         */
+        /** docs/03 §3.2.3.1: UUID v4 と衝突しない NUL-prefix sentinel (FR-PH-55, P3-4)。 */
         const val UNKNOWN_SESSION_ID: String = " __pending__"
     }
 }
