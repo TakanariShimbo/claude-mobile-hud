@@ -1,4 +1,4 @@
-// :phone — Phone 側 Android アプリ (Phase 3 §9.1 / AD-19)。
+// docs/03 §9.2.5: Phone Android app, JVM 21, :protocol + :cxrglobal:lib + ML Kit code scanner。
 
 plugins {
     alias(libs.plugins.android.application)
@@ -54,8 +54,7 @@ kotlin {
 
 dependencies {
     implementation(project(":protocol"))
-    // 4c1: CXR-L (Rokid Glass SDK) ラッパ。GlassConnectionService / GlassRelay /
-    // GlassEventDispatcher が利用。
+    // docs/03 §9.2.5: CXR-L Phone 側 bind は :cxrglobal:lib 経由 (§9.2.3)。
     implementation(project(":cxrglobal:lib"))
 
     // Compose
@@ -87,8 +86,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.okhttp.sse)
 
-    // 4-6: QR pairing 用 (Hub の pair CLI が吐く QR を読み取る)。Google Play Services
-    // 経由の ML Kit Code Scanner を使う (`com.google.mlkit.vision.codescanner.*`)。
+    // docs/03 §9.2.5: ML Kit Code Scanner で Hub pair CLI の QR を Settings から読む。
     implementation(libs.play.services.code.scanner)
 
     // Unit tests (JUnit Jupiter on JVM)

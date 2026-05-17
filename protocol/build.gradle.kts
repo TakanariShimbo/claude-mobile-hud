@@ -1,5 +1,4 @@
-// :protocol — Phone / Glass で共有する wire protocol 定義 (Phase 3 §2 / AD-02)。
-// Android 依存なしの Kotlin/JVM library。
+// docs/03 §9.2.4: :protocol = Kotlin/JVM library (AD-02), JVM 21, golden.write 伝播。
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -21,8 +20,6 @@ dependencies {
 
 tasks.test {
     useJUnitPlatform()
-    // golden 再生成モードを Gradle property → JVM system property に伝播。
-    // 通常は verify-only、`-Pgolden.write=true` でファイル書き込みモードに切替。
     if (project.hasProperty("golden.write")) {
         systemProperty("golden.write", project.property("golden.write").toString())
     }

@@ -1,6 +1,4 @@
-// :glass — Glass 側 Android アプリ (Phase 3 §9.1 / AD-19)。
-// Phase 4 step 5a で CXR-L SDK 連携 (`cxr-service-bridge`) を取り込み、wire event
-// receive endpoint と画面 wake / 通知 chime / 構造化ログを実装。
+// docs/03 §9.2.6: Glass Android app, JVM 21, cxr-service-bridge 直接 bind + Robolectric-skip 方針。
 
 plugins {
     alias(libs.plugins.android.application)
@@ -38,9 +36,7 @@ android {
     buildFeatures {
         compose = true
     }
-    // 4-5a: Robolectric を入れない方針 (Phone と同じ "純粋 Kotlin で書ける部分は
-    // src/test に出す" 方針)。GlassBridge の atomicity は internal な reducer
-    // フックを通して JVM 単体テスト可能にする。
+    // docs/03 §9.2.6: Robolectric を入れず、GlassBridge atomicity は internal reducer hook で JVM test。
     testOptions {
         unitTests {
             isReturnDefaultValues = true
@@ -57,9 +53,7 @@ kotlin {
 dependencies {
     implementation(project(":protocol"))
 
-    // 4-5a: Rokid CXR-L の Glass 側バインダ (CXRServiceBridge + Caps)。
-    // phone 側は `:cxrglobal:lib` 経由で client-l を使い、こちらは system service
-    // 同梱版に直接バインドする (Rokid 推奨構成)。
+    // docs/03 §9.2.3 / §9.2.6: Glass は cxr-service-bridge 直接バインド (Rokid 推奨)。
     implementation(libs.rokid.cxr.service.bridge)
 
     implementation(libs.kotlinx.serialization.json)

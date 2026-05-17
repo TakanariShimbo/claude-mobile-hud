@@ -1,5 +1,4 @@
-# Gradle Version Catalog.
-# Phase 4 着手時に必要なら見直し可。
+# docs/03 §9.2.2 / §9.2.3: 分類軸 + Rokid CXR-L 2 artifact 使い分け。
 
 [versions]
 # Build tools
@@ -23,9 +22,7 @@ kotlinxCoroutines = "1.9.0"
 # Networking
 okhttp = "5.1.0"
 
-# Rokid CXR-L
-# - client-l (phone 側 = MediaStreamService への bind 経路) は :cxrglobal:lib 経由で使う
-# - cxr-service-bridge (glass 側 = system service 内蔵バインダ) は :glass で直接使う
+# Rokid CXR-L (docs/03 §9.2.3)
 cxrClientL = "1.0.1"
 cxrServiceBridge = "1.0-20260212.103714-88"
 

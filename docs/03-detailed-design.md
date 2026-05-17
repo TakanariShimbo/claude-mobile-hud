@@ -4595,13 +4595,141 @@ AC-09 検証ランナー (§7.2 `verify_atomicity.py`) が **target にする ev
 ```kotlin
 // settings.gradle.kts
 rootProject.name = "claude-mobile-hud"
-include(":protocol", ":phone", ":glass")
+include(":protocol", ":phone", ":glass", ":cxrglobal:lib")
+project(":cxrglobal:lib").projectDir = file("cxrglobal/lib")
 ```
 
 - `protocol` は library。Android 依存なし
 - `phone` / `glass` は Android application、`implementation(project(":protocol"))` で参照
 - Hub / Bridge は Gradle 管理外 (独立 npm project)
-- CXR-L 用 cxrglobal は git submodule として `glass/cxrglobal/` 配下に置く
+- CXR-L 用 cxrglobal は git submodule として repo root の `cxrglobal/` 配下に置き、
+  `:cxrglobal:lib` として Android library で取り込む
+
+#### 9.2.1 `dependencyResolutionManagement` と repository 解決順 (settings.gradle.kts)
+
+`repositoriesMode = FAIL_ON_PROJECT_REPOS` で module 側に `repositories {}` を書かせず、
+root に集約する。順序は意味があり、**公式 / 一次ソースを必ず先頭に置く**:
+
+1. `google()` — Android / Jetpack
+2. `mavenCentral()` — kotlinx / okhttp / 一般 OSS
+3. `maven { url = "https://maven.rokid.com/repository/maven-public/" }` —
+   `:cxrglobal:lib` が依存する `com.rokid.cxr:client-l` の取得経路
+4. `maven { url = "https://maven.aliyun.com/repository/google" }` —
+   中国環境からの `google()` 阻害時の保険 fallback (最後)
+
+**aliyun を先頭に置かない**: CI runner (US) では aliyun が 502 Bad Gateway を返した時
+Gradle が repo 全体を `disable on error` 扱いにし、他 repo にもフォールバックしないまま
+build が止まる事故が起きた。事故再発防止のため公式 → 中国 fallback の順序を維持する。
+
+`pluginManagement` は別ブロックで `google()` を `com.android.*` / `com.google.*` /
+`androidx.*` のみに絞り込み、これ以外の group を google() で誤って探さないようにする
+(Kotlin / serialization / compose plugin は `gradlePluginPortal()` / `mavenCentral()`
+経由で解決)。
+
+#### 9.2.2 `libs.versions.toml` (Gradle Version Catalog) の分類
+
+Phase 4 着手時に見直し可能な単一の version source。`[versions]` セクションを以下の軸で
+分類して、Phase 4 で別 module / 別ビルドからも `libs.xxx` でアクセスできるようにする:
+
+- **Build tools** — `agp` / `kotlin` (Kotlin compiler / serialization / compose plugin を
+  単一 version で揃える)
+- **Android core** — `coreKtx` / `lifecycleRuntimeKtx` / `activityCompose` /
+  `composeBom` / `navigationCompose` / `datastore` / `securityCrypto`
+- **Persistence** — DataStore (Preferences) と Security Crypto (EncryptedSharedPreferences)
+- **Kotlin libs** — `kotlinxSerializationJson` / `kotlinxCoroutines`
+- **Networking** — `okhttp` (Phone Hub HTTP/SSE と transcription WS で共有)
+- **Rokid CXR-L** — `cxrClientL` と `cxrServiceBridge` を**別々に管理** (§9.2.3 参照)
+- **Test** — `junit` (4) / `junitJupiter` (5) / `junitPlatform` / `turbine` /
+  `espressoCore`
+
+Compose は BOM で個別 artifact の version を吸収する (`material3` / `ui` /
+`ui-graphics` / `material-icons-extended` は version 指定なし)。
+
+#### 9.2.3 Rokid CXR-L: `client-l` vs `cxr-service-bridge` の使い分け
+
+CXR-L には Phone 側と Glass 側で **bind 経路が異なる 2 つの artifact** があり、Phase 3
+時点で両者の責務を明確に分離する:
+
+- **`com.rokid.cxr:client-l`** (`cxrClientL`) — Phone 側用。`MediaStreamService` への
+  bind 経路を提供する。Phone 側は `:cxrglobal:lib` 経由 (Rokid 提供の wrapper) で使う
+  ことで CXR-L 内部の binder 結線を黒箱化する
+- **`com.rokid.cxr:cxr-service-bridge`** (`cxrServiceBridge`) — Glass 側用。system
+  service 内蔵の binder にバインドする版。Glass 側は wrapper を介さず `:glass` モジュール
+  から直接 `implementation(libs.rokid.cxr.service.bridge)` で取り込む (Rokid 推奨構成)
+
+両 artifact は同じ Rokid maven (`maven.rokid.com`) から取得する。
+
+#### 9.2.4 `protocol/build.gradle.kts`
+
+`:protocol` は Phone / Glass / (TS は別の golden) 全方向の依存元なので、**Android 依存を
+持たない Kotlin/JVM library** に固定する (AD-02)。`alias(libs.plugins.kotlin.jvm)` +
+`alias(libs.plugins.kotlin.serialization)` のみ。
+
+`jvmToolchain(21)` で JVM 21 を pin (§9.2.7)。test は JUnit Platform (Jupiter)。
+
+**`-Pgolden.write=true` の伝播**: Gradle property は test JVM には自動で渡らないので
+`tasks.test { if (project.hasProperty("golden.write")) systemProperty(...) }` で
+明示的に system property に書き写す。通常は verify-only (golden ファイルを read-only
+で比較)、`-Pgolden.write=true` 時のみ test 側が golden ファイルを書き戻すモードに切替。
+
+#### 9.2.5 `phone/build.gradle.kts`
+
+Android application + Compose + Serialization。`compileSdk = 36` / `minSdk = 31` /
+`targetSdk = 36` / `applicationId = "com.example.claudemobilehud.phone"`。
+
+`compose = true` + `kotlinx.serialization` plugin の組み合わせ (`kotlin-compose` +
+`kotlin-serialization` を libs.plugins から alias)。
+
+依存の特徴:
+
+- `implementation(project(":protocol"))` — wire 共有
+- `implementation(project(":cxrglobal:lib"))` — Phase 4c1 で追加。CXR-L の Phone 側
+  bind を `GlassConnectionService` / `GlassRelay` / `GlassEventDispatcher` から使う
+  (§3.3.3 / §3.4.1 / §3.4.2)
+- `implementation(libs.play.services.code.scanner)` — Phase 4-6 で追加。Hub の
+  `pair` CLI が吐く QR を Phone Settings から読み取るために ML Kit Code Scanner
+  (`com.google.mlkit.vision.codescanner.*`) を使う。module は Play Services 経由で
+  初回利用時に on-demand download (manifest declare 不要)
+- `implementation(libs.androidx.datastore.preferences)` — `SettingsStore` の永続化
+- `implementation(libs.androidx.security.crypto)` — `TokenStore` の暗号化保存
+  (`EncryptedSharedPreferences`)
+
+unit test は `useJUnitPlatform()` で Jupiter、`isReturnDefaultValues = true` で Android
+framework stub を default 値返却に。androidTest は Compose UI test + Espresso。
+
+#### 9.2.6 `glass/build.gradle.kts`
+
+Android application + Compose + Serialization。Phone と同じ SDK 構成 / JVM 21 toolchain
+だが、依存と test 方針が異なる:
+
+- `implementation(libs.rokid.cxr.service.bridge)` — §9.2.3 の Glass 側経路。`:cxrglobal:lib`
+  経由ではなく直接 `cxr-service-bridge` を取り込み、Glass 側で `CXRServiceBridge` / `Caps`
+  を `MainActivity` / `GlassBridge` から使う (Phase 4-5a)
+- **Robolectric を入れない方針** (Phase 4-5a): Phone 側と同じく「純粋 Kotlin で書ける
+  部分は `src/test` に出す」原則を Glass 側にも適用する。`GlassBridge` の atomicity
+  (AD-15) は **internal な reducer フック** (`GlassBridgeReducer`) を通して JVM 単体
+  テスト可能にすることで、Robolectric / instrumentation を持ち込まずに済ませる
+  (テスト start-up cost を抑え、Phase 4 開発速度を優先)
+
+`testOptions.unitTests.isReturnDefaultValues = true` のみで `all { useJUnitPlatform() }`
+は付けず、root の `tasks.withType<Test>().configureEach { useJUnitPlatform() }` で
+全 test task に Jupiter を当てる。
+
+#### 9.2.7 JVM toolchain / Kotlin / Compose Compiler の統一
+
+3 module (`:protocol` / `:phone` / `:glass`) で以下を揃える:
+
+- `jvmToolchain(21)` — Kotlin compile JVM target を JVM 21 に固定 (Compose 1.7+ /
+  okhttp 5 / Java 21 LTS 採用済み)
+- `compileOptions.{source,target}Compatibility = VERSION_21` (Android module のみ)
+- `kotlin` / `kotlin-compose` / `kotlin-serialization` plugin は `libs.plugins.kotlin`
+  から共通 alias (`libs.versions.kotlin` 単一 version で揃える)
+- AGP は `libs.versions.agp` で pin
+
+統一する理由は **Phase 4 の cross-module compile での JVM target 不整合 (Kotlin が JVM
+17 で compile, Android が JVM 21 を要求 → bytecode 不一致) を避ける**ため。version
+catalog でしか version を持たないので、新 module 追加時も `libs.versions.toml` 1 箇所の
+更新で済む。
 
 ### 9.3 dispatcher wrapper (`claude-mobile-hud`)
 
