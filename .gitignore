@@ -21,9 +21,8 @@ dist/
 *.log
 .env
 .env.local
-package-lock.json
-# ↑ Phase 4 で CI を回す段階で package-lock.json は commit したくなる可能性大。
-# その時に gitignore から外して規約化する。
+# Phase 4: package-lock.json は CI (`actions/setup-node` の cache: npm) と
+# Bridge / Hub の reproducible install のために commit する。
 
 # Python (もし使うことになったら)
 __pycache__/
