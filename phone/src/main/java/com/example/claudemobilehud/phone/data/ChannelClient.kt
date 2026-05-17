@@ -220,7 +220,20 @@ open class ChannelClient(
     private fun newRequest(path: String): Request.Builder {
         val url = baseUrl.trimEnd('/') + "/" + path
         val builder = Request.Builder().url(url)
-        if (token.isNotEmpty()) builder.header("X-Token", token)
+        if (token.isNotEmpty()) {
+            // OkHttp の Request.Builder.header は ASCII printable (0x20-0x7E) のみ受理。
+            // non-ASCII / 制御文字を含む token は IllegalArgumentException で死んで通常の
+            // Failed (再試行) 扱いになるため、ここで先に検出して AuthFailed に翻訳する。
+            // ユーザが Settings で意図せず日本語等を貼り付けた場合に「再ペアダイアログ」
+            // が表示される (= ConnectivityState.AuthFailed) UX 経路にのせる。
+            for (c in token) {
+                val code = c.code
+                if (code < 0x20 || code > 0x7E) {
+                    throw SharedWireError.Connection.AuthFailed.asException()
+                }
+            }
+            builder.header("X-Token", token)
+        }
         return builder
     }
 

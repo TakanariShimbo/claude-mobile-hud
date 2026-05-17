@@ -4,6 +4,7 @@ import com.example.claudemobilehud.phone.data.model.ConnectivityState
 import com.example.claudemobilehud.phone.data.model.Settings
 import com.example.claudemobilehud.phone.data.model.SseEvent
 import com.example.claudemobilehud.phone.log.StructuredLog
+import com.example.claudemobilehud.protocol.error.SharedWireError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -128,6 +129,12 @@ class ConnectionController(
             } catch (e: Throwable) {
                 lastError = e.message
                 log.warn("connect_collect_threw", e)
+                // newRequest() の token validate などで AuthFailed.asException() が
+                // 投げられた場合は authFailed フラグを立てて AuthFailed 状態に遷移する。
+                // 例: non-ASCII token を Settings で保存したケース。再ペアダイアログ
+                // 表示まで通る (= ConnectivityState.AuthFailed)。
+                val wire = (e as? WireErrorException)?.wireError
+                if (wire == SharedWireError.Connection.AuthFailed) authFailed = true
             }
 
             if (authFailed) {
