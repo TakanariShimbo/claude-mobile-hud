@@ -30,7 +30,26 @@ object SoundEffects {
     private const val PERMISSION_INTERVAL_MS = 220L
     private val handler = Handler(Looper.getMainLooper())
 
+    @Volatile private var appContext: Context? = null
+
     enum class Kind { INCOMING_REPLY, INCOMING_PERMISSION, SEND, RECORD_START, RECORD_STOP }
+
+    /**
+     * Application context を 1 回保存。以後 `play(kind)` で context 引数なしに再生可能。
+     * Glass `MainActivity.onCreate` 内 GlassBridge.init の直後に呼ぶ。
+     */
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
+     * `init()` 済みなら再生、未 init なら silent no-op (JVM unit test 経路で安全)。
+     * Compose 非依存層 (ConversationStateHolder 等) から context を引き回さず使うため。
+     */
+    fun play(kind: Kind) {
+        val ctx = appContext ?: return
+        play(ctx, kind)
+    }
 
     fun play(context: Context, kind: Kind) {
         when (kind) {

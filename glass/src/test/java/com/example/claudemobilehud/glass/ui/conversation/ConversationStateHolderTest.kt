@@ -31,6 +31,7 @@ class ConversationStateHolderTest {
         val gestures = mutableListOf<GestureKind>()
         var listeningCancelCount = 0
         val verdicts = mutableListOf<Pair<String, PermissionDecision>>()
+        val sfx = mutableListOf<com.example.claudemobilehud.glass.SoundEffects.Kind>()
         override fun sendGesture(which: GestureKind) {
             gestures += which
         }
@@ -39,6 +40,9 @@ class ConversationStateHolderTest {
         }
         override fun sendPermissionVerdict(requestId: String, decision: PermissionDecision) {
             verdicts += requestId to decision
+        }
+        override fun playSfx(kind: com.example.claudemobilehud.glass.SoundEffects.Kind) {
+            sfx += kind
         }
     }
 

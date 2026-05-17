@@ -48,11 +48,17 @@ class ConversationStateHolder(
     scope: CoroutineScope,
     private val bridge: Sender = DefaultSender,
 ) {
-    /** GlassBridge への送信を 1 個の seam にまとめる (テストで差し替え可)。 */
+    /** GlassBridge への送信 + UI 効果音を 1 個の seam にまとめる (テストで差し替え可)。 */
     interface Sender {
         fun sendGesture(which: GestureKind)
         fun sendListeningCancel()
         fun sendPermissionVerdict(requestId: String, decision: PermissionDecision)
+        /**
+         * Glass ローカルの UI 効果音再生 (録音開始 TAP の即時 feedback 等)。
+         * 状態遷移ベース検出だと Phone との往復 (~150-300ms) ぶん遅延するため、ボタン押下時点で
+         * 鳴らす必要があるものはここから呼ぶ。
+         */
+        fun playSfx(kind: com.example.claudemobilehud.glass.SoundEffects.Kind)
     }
 
     object DefaultSender : Sender {
@@ -60,6 +66,8 @@ class ConversationStateHolder(
         override fun sendListeningCancel() = GlassBridge.sendListeningCancel()
         override fun sendPermissionVerdict(requestId: String, decision: PermissionDecision) =
             GlassBridge.sendPermissionVerdict(requestId, decision)
+        override fun playSfx(kind: com.example.claudemobilehud.glass.SoundEffects.Kind) =
+            com.example.claudemobilehud.glass.SoundEffects.play(kind)
     }
 
     @Stable
@@ -153,7 +161,15 @@ class ConversationStateHolder(
 
     private fun handleIdle(g: GlassGesture) {
         when (g) {
-            GlassGesture.Tap -> bridge.sendGesture(GestureKind.TAP)
+            GlassGesture.Tap -> {
+                // 録音開始 sound は TAP 押下時点で鳴らす (UX 即時性)。
+                // Phone 側 mic capture は ~50-200ms 後に始まるが、その間は無音 lead-in
+                // なので sound 末尾が capture に乗ってもユーザ発話の冒頭はカットされない。
+                // 状態遷移ベース (TranscriptState → LISTENING) だと round-trip ぶん
+                // 遅れて聞こえるので、ここで先行発火する。
+                bridge.playSfx(com.example.claudemobilehud.glass.SoundEffects.Kind.RECORD_START)
+                bridge.sendGesture(GestureKind.TAP)
+            }
             GlassGesture.SwipeForward -> _scrollRequest.tryEmit(+SCROLL_STEP)
             GlassGesture.SwipeBack -> _scrollRequest.tryEmit(-SCROLL_STEP)
             GlassGesture.DoubleTap -> {

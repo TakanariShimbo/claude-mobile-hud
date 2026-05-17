@@ -48,6 +48,10 @@ class MainActivity : ComponentActivity() {
         setTurnScreenOn(true)
 
         GlassBridge.init(applicationContext)
+        // SoundEffects は Compose 非依存層 (ConversationStateHolder) からも呼ばれるので
+        // ここで application context を 1 回登録しておく。play(Kind) overload はこの
+        // context を使う。init 漏れ時は silent no-op。
+        SoundEffects.init(applicationContext)
         enableEdgeToEdge()
 
         // 通知購読は lifecycleScope に乗せる (Activity 破棄でだけ停止)。
@@ -70,19 +74,15 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // UI フィードバック音: 録音開始/停止 を TranscriptState 遷移で検出。
+        // UI フィードバック音: 録音停止 を TranscriptState `LISTENING → 非LISTENING` 遷移で検出。
+        // 録音開始は ConversationStateHolder.handleIdle で TAP 押下時に先行発火する (UX 即時性)。
         // 初回 emission (prev == null) では鳴らさない (起動直後の collect で誤発火を防止)。
         lifecycleScope.launch {
             var prev: TranscriptState? = null
             GlassBridge.phoneState.collect { state ->
                 val curr = state.transcriptState
-                if (prev != null && prev != curr) {
-                    when {
-                        curr == TranscriptState.LISTENING ->
-                            SoundEffects.play(this@MainActivity, SoundEffects.Kind.RECORD_START)
-                        prev == TranscriptState.LISTENING ->
-                            SoundEffects.play(this@MainActivity, SoundEffects.Kind.RECORD_STOP)
-                    }
+                if (prev == TranscriptState.LISTENING && curr != TranscriptState.LISTENING) {
+                    SoundEffects.play(this@MainActivity, SoundEffects.Kind.RECORD_STOP)
                 }
                 prev = curr
             }
