@@ -15,11 +15,7 @@ import com.example.claudemobilehud.phone.ui.dialogs.SettingsDialog
 import com.example.claudemobilehud.phone.ui.util.shortSessionLabel
 import com.example.claudemobilehud.protocol.PermissionDecision
 
-/**
- * Phase 3 §3.5.1: dialog の if 分岐をここに集約。Scaffold (描画ツリー本体) と
- * 切り離すことで `MainScreenScaffold` の recomposition と dialog 表示状態の
- * recomposition が独立する。
- */
+/** docs/03 §3.5.1.9: dialog 分岐集約 (Scaffold と分離して recompose 粒度を切る)。 */
 @Composable
 fun MainScreenDialogs(
     ui: PhoneUiState,
@@ -46,17 +42,11 @@ fun MainScreenDialogs(
         ExitDialog(onDismiss = { dialogState.showExit = false })
     }
 
-    // 現在見ているセッションの pending だけを in-app ダイアログで表示。別 session の
-    // permission は通知シェードの Allow/Deny で処理できるので画面遷移を奪わない (glass 側
-    // のフィルタと対称)。filter は Repository.combine で計算済み (`ui.pendingForCurrent`)、
-    // UI はそれを読むだけ (P1-6 of AC-05)。
+    // docs/03 §3.5.1.9: pendingForCurrent (Repository combine 済) のみ表示 (P1-6 AC-05)。
     val currentPending = ui.pendingForCurrent
     val pending = currentPending.firstOrNull()
     if (pending != null) {
-        // P1-B of 4c2 review: `respondPermission` は suspend で網羅に時間がかかり、
-        // 完了して `_pendingPermissions` が更新されるまで dialog は閉じない。連打防止に
-        // 当該 request_id ごとに `responded` ゲートを持つ。ゲートは pending.requestId に
-        // keying してあるので、別 request が来たら自動でリセット。
+        // docs/03 §3.5.1.9: request_id keyed responded gate で連打 → 重複 verdict 防止 (P1-B)。
         var responded by remember(pending.requestId) { mutableStateOf(false) }
         PermissionDialog(
             request = pending,

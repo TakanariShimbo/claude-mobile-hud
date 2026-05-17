@@ -6,11 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 
-/**
- * `ImageAttachment.localPath` から `ImageBitmap` を生成して、Composition 範囲で
- * cache する。Bitmap デコードはメモリと CPU を食うので recomposition のたびに
- * やり直さないよう `remember(path)` で keying する。
- */
+/** docs/03 §3.5.1.10: BitmapFactory.decodeFile を remember(path) で Composition cache。decode 失敗は null fallback。 */
 @Composable
 fun rememberImageBitmapFromPath(path: String?): ImageBitmap? = remember(path) {
     if (path.isNullOrBlank()) return@remember null

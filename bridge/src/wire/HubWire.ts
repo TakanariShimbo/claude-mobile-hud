@@ -1,6 +1,5 @@
-// Hub ↔ Bridge の TCP NDJSON wire 型 (Bridge 側の視点)。
-// Hub 側 (hub/src/wire/BridgeWire.ts) と表裏一体。Phase 2 §4.3.2 / Phase 3 §6.1。
-// shape は完全に一致させること (parity)。
+// docs/02 §4.3.2 / docs/03 §6.1: Hub ↔ Bridge NDJSON wire 型 (Bridge 視点)。
+// Hub 側 hub/src/wire/BridgeWire.ts と shape parity (HubClient.handleLine の exhaustive guard §6.2.2.7 で機械検出)。
 
 // --- Bridge → Hub ---
 
@@ -49,9 +48,9 @@ export type SendMessage = {
     type: "send";
     chat_id: string;
     text: string;
-    /** Phone 由来の base64 画像 (data: prefix なし)。Bridge 側で staging して image_path を Claude へ。 */
+    /** docs/03 §6.2.4: Phone 由来 base64 画像 (data: prefix なし)、Bridge が staging。 */
     image_base64?: string;
-    /** image_base64 の MIME (例: "image/jpeg")。 */
+    /** docs/03 §6.2.4.3: MIME whitelist (image/jpeg|png|webp|gif)。 */
     image_mime?: string;
 };
 

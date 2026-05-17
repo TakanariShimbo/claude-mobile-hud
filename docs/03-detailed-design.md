@@ -2277,6 +2277,45 @@ scope.launch {
 ことで、`finishAndRemoveTask` の時点でプロセスに残作業が無いことを保証する (P2-H
 の race 解消経路、§3.3.6 lifecycle 集約と対)。
 
+##### 3.5.1.9 `MainScreenDialogs` (dialog 分岐集約)
+
+5 種類の dialog を if-then で組み立てる小 composable: `SettingsDialog` /
+`GlassDialog` / `ExitDialog` / `PermissionDialog` / `DeleteSessionDialog`。
+Scaffold (`MainScreenScaffold`) と分離する理由は、dialog の open/close state 変化
+で Scaffold ツリーを recompose させないため (AD-18 の粒度方針、§3.5.3)。
+
+**P1-6 (AC-05): pendingForCurrent filter**: 表示する permission は **現在の session の
+分だけ**。別 session の permission は通知シェードの Allow/Deny で処理できるので画面
+遷移を奪わない (Glass 側のフィルタと対称)。filter は `Repository.combine` で計算済み
+の `ui.pendingForCurrent: List<PendingPermission>` を読むだけ。
+
+**P1-B 4c2 review: `responded` 連打防止 gate**: `respondPermission` は suspend で
+HTTP request + `_pendingPermissions` 更新まで時間がかかるため、完了して dialog が
+閉じるまで「もう一度押せる」窓ができる。連打すると Hub に重複 verdict が飛んで
+`PERMISSION_GONE` snackbar の連鎖になる。対策として **当該 `request_id` ごとに**
+`var responded by remember(pending.requestId) { mutableStateOf(false) }` で gate
+する (= `request_id` キーなので別 request が来たら自動でリセット)。
+
+##### 3.5.1.10 `phone/ui/util/` 3 ファイル
+
+UI 層の小ユーティリティ。それぞれ単機能で「型契約 + 使い所」を 1 行 KDoc に縮約。
+
+| ファイル | 関数 | 用途 |
+|---|---|---|
+| `Format.kt` | `shortSessionLabel(id)` | UUID 先頭 8 文字。`UNKNOWN_SESSION_ID` sentinel (FR-PH-55) は `"unknown"` に明示変換 |
+| `ContextExt.kt` | `Context.findActivity()` | Compose `LocalContext.current` → `Activity` 抽出。`ContextWrapper` チェーンを `baseContext` で辿る |
+| `ImageBitmaps.kt` | `rememberImageBitmapFromPath(path)` | `BitmapFactory.decodeFile` を `remember(path)` で Composition cache。recomposition のたびの decode 再実行 (CPU + memory コスト大) を防ぐ目的 |
+
+**`findActivity` の `ContextWrapper` チェーン辿り**: Activity は `ContextThemeWrapper`
+→ `Activity` のように入れ子になっていることがあるため、単純な `as? Activity` cast
+では nullable で取れない。`baseContext` を while loop で辿り、最初に当たった
+`Activity` を返す。
+
+**`rememberImageBitmapFromPath` の null / 失敗扱い**: path が null / blank なら
+null を返す。decode 失敗 (file が消えた、format 不正) は `runCatching` で吸収して
+null。caller (`InputBar` の attach chip など) は null で「画像プレビュー無し」UI を
+出す契約。
+
 #### 3.5.2 `ChatViewModel`
 
 ```kotlin
@@ -3283,6 +3322,17 @@ DoubleTap は bus に積まれるだけにする (= 多重 finish 防止)。
 shape)`)。**塗りつぶしを使わない理由**: Rokid HUD は緑モノクロで、塗りつぶしは目に
 眩しい (1 dp 単位の輝度差を読むデバイス特性)。領域分けは細い border 1 つで表現し、
 中身は黒背景のまま読ませる方針。
+
+#### 4.11.6 `theme/Theme.kt` (Material3 darkColorScheme 固定)
+
+`GlassTheme` は Material3 の `dynamicColor` (Android 12+ wallpaper-based palette) を
+**使わない**: HUD は単色緑なので OS 側のテーマ色が混ざると逆に読みにくい。
+`darkColorScheme(primary=TextGreen, onPrimary=GlassBackground, ...)` で **全 slot を
+緑系で固定**する。
+
+- `primary` / `onPrimary*` / `secondary` / `surface` / `background` を `TextGreen` /
+  `GlassBackground` (Color.Black) の 2 色で組む
+- `MaterialTheme` で wrap してから `Typography` を渡す (`Type.kt` 側の HUD 用 sp 定義)
 
 ### 4.12 構造化ログ
 

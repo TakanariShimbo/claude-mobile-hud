@@ -1,8 +1,5 @@
-// permission の中央 state。Phase 3 §5.2.3 / AD-13 / FR-HU-12〜15。
-// - add / remove: Bridge から permission を受けたとき / verdict を返したとき
-// - onBridgeDisconnected (FR-HU-13): bridge 切断時に当該 outstanding を Phone に abort push
-// - buildSnapshot (AD-13 / FR-HU-14): SSE 再接続時に Phone へ ID 集合と各 entry を再 push
-// - Hub 再起動時は空 (FR-HU-15) — 永続化しない
+// docs/03 §5.2.3 / AD-13 / FR-HU-12〜15: permission の中央 state。
+// 再起動で空 (FR-HU-15、永続化しない) / Bridge 切断時の一括 abort は §5.2.3.7。
 
 import type { PermissionAbortSse } from "../wire/PhoneWire.js";
 
@@ -41,7 +38,7 @@ export class OutstandingPermissions {
         return this.entries.size;
     }
 
-    /** FR-HU-13: Bridge 切断時、その bridge 由来の outstanding を全部 abort して push */
+    /** docs/03 §5.2.3.7: 当該 bridge 由来 outstanding を Phone へ一斉 abort (FR-HU-13)。 */
     onBridgeDisconnected(
         bridgeSessionId: string,
         pushToPhone: (event: PermissionAbortSse) => void,
@@ -57,7 +54,7 @@ export class OutstandingPermissions {
         return abortedIds;
     }
 
-    /** AD-13 / FR-HU-14: SSE 再接続時に Phone へ送る snapshot (createdAtMs 昇順) */
+    /** docs/03 §5.2.4 / AD-13: SSE 再接続時 snapshot (createdAtMs 昇順、FR-HU-14)。 */
     buildSnapshot(): { requestIds: string[]; entries: OutstandingEntry[] } {
         const sorted = Array.from(this.entries.values()).sort(
             (a, b) => a.createdAtMs - b.createdAtMs,
@@ -67,5 +64,4 @@ export class OutstandingPermissions {
             entries: sorted,
         };
     }
-
 }

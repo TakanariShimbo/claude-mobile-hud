@@ -4,10 +4,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
-/**
- * Rokid Glass HUD は単色緑モノクロ。Material 3 の dynamicColor は使わず、
- * 全体を緑トーンの ColorScheme に固定する。
- */
+// docs/03 §4.11.6: Material3 dynamicColor は使わず GlassColorScheme で緑トーン固定。
 private val GlassColorScheme = darkColorScheme(
     primary = TextGreen,
     onPrimary = GlassBackground,
