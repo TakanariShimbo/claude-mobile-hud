@@ -1164,6 +1164,39 @@ fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
 
 **`close()` で channel を閉じる**: ws を `runCatching { close(1000) }` した後、`_events.close()` で Channel も閉じる。collector 側は cancellation で teardown される (リーク防止)。
 
+##### 3.2.5.12 `MicCapture` (AudioRecord wrapper)
+
+24kHz mono PCM16 を `chunkMs` ms 単位で `frames: SharedFlow<ByteArray>` に流す `MicCaptureSource` 実装。
+
+**`AudioSource.VOICE_RECOGNITION` 選択**: Android 側で **AEC / NS が薄く効く** ようにする。`MIC` source だと raw に近く noise が乗りやすい。歌の transcription はターゲットではないので music mic を避ける。
+
+**起動失敗の早期 return + log (例外なし)**: 次の 2 経路で起動失敗を吸収:
+
+```kotlin
+if (minBuf <= 0) {                         // AudioRecord.getMinBufferSize 失敗
+    log.warn("mic_min_buf_invalid"); return
+}
+if (rec.state != STATE_INITIALIZED) {       // AudioRecord init 失敗
+    log.warn("mic_audio_record_uninit"); rec.release(); return
+}
+```
+
+**例外を投げない**: 呼び出し側 (`TranscriptionClient`) は frames が一切来ないことで上位 timeout で検知する。例外を投げると `routeFrame` の collector が teardown される race を踏む。
+
+**buffer sizing**: `bufferBytes = max(minBuf, frameBytes * 4)`。最低 4 chunk 分は AudioRecord 内部 buffer に余裕を持たせて、IO dispatcher の read 周期揺らぎを吸収する。
+
+**IO dispatcher で blocking read**: `scope.launch(Dispatchers.IO) { while (RECORDING) { rec.read(buf, 0, size) } }`。`Job.cancel` でループ脱出 → `rec.stop` + `rec.release` を `finally` で確実に呼ぶ。
+
+**`_frames` の buffer policy**:
+
+```kotlin
+MutableSharedFlow<ByteArray>(extraBufferCapacity = 64, onBufferOverflow = DROP_OLDEST)
+```
+
+`TranscriptionClient` 側の pre-buffer (§3.2.5.4) に積まれる前段なので `SUSPEND` は不要だが、**起動直後の burst** (= AudioRecord が走り出した瞬間にまとめて来る数 frame) を取りこぼさないため 64 frame (~2.5s @ 40ms) の余裕を持たせる。
+
+**drop frame sampling log (P2-6)**: `tryEmit` が `false` を返した (= 1 frame drop された) ら `droppedFrames++` し、**10 件目ごとに 1 行 warn** を残す。silent drop は transcript 品質低下に直結するので、実機 deployment 後の field 解析で見えるようにする。
+
 #### 3.2.6 `Pairing` + `QrScanner`
 
 Hub の `pair` CLI が表示する QR を読み取り `Settings` の接続情報 (`baseUrl` + `token`) に反映する純粋データ層パイプライン。
@@ -2747,7 +2780,53 @@ LaunchedEffect(sessions, current) {
 
 ユーザが session B にカーソルを動かしている最中に phone 側 `currentSessionId` が C に変わると (reply auto-switch、§3.2.1.3.1)、カーソルが勝手に C へジャンプする UI hazard があった。**FR-GL-20〜22 はカーソル位置の追従を要求していない** ので、初回マウント時のみ align してそれ以降はユーザ意志を尊重する。size 変化に対する clamp はユーザ意志を上書きしないので常に走らせる。
 
-### 4.10 構造化ログ
+### 4.10 `ScreenAwakeManager`
+
+グラスの display 電源管理の単一窓口。
+
+#### 4.10.1 `FLAG_KEEP_SCREEN_ON` を使わない理由
+
+Rokid YodaOS では `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` が **CXR-L 経由の reply 受信などをきっかけに事実上無効化される** ことを実機で確認。framework の暗黙 user-activity 経路に頼ると、HUD で reply を受け取った瞬間に画面が暗転する hazard が出る。
+
+このため画面 ON を維持したい場面では **`SCREEN_BRIGHT_WAKE_LOCK` を自前で acquire** する方式に倒す (deprecated API だが Glass 環境では必須)。
+
+#### 4.10.2 2 つの責務
+
+| API | 用途 | 仕様 |
+|---|---|---|
+| `wakeOnNotification(ctx)` | 画面 OFF からの一発 wake-up | `SCREEN_BRIGHT_WAKE_LOCK \| ACQUIRE_CAUSES_WAKEUP \| ON_AFTER_RELEASE`、`acquire(3s)` |
+| `acquireWhileStarted(ctx, lifecycle)` | `Lifecycle.STARTED` の間ずっと画面 ON | `SCREEN_BRIGHT_WAKE_LOCK \| ON_AFTER_RELEASE`、`acquire(10 min timeout)` |
+
+`releaseNotificationWake()` は Activity 終了時の保険解放 (`MainActivity.onDestroy`)。
+
+#### 4.10.3 通知 wake-up と長期 WakeLock の干渉防止
+
+```kotlin
+if (pm.isInteractive) {
+    log.debug("wake_skip_interactive")
+    return
+}
+```
+
+会話画面が `acquireWhileStarted` で長期 WakeLock を握っている間に通知 wake-up が走ると、3 秒 timeout で release されたタイミングで画面が落ちる hazard がある。`PowerManager.isInteractive == true` の間は **wake-up を skip** することで、長期側に主導権を残す。
+
+#### 4.10.4 `KEEP_ON_TIMEOUT_MS = 10 min` の根拠 (P2-A)
+
+`ON_STOP` を経由せずに process kill された場合、`PowerManager` 側に「無期限 acquire のまま hold」状態が残り得る。10 分 timeout を付け、Activity が再 ON_START したときに **再 acquire される設計** に倒す:
+
+- 10 分以内に Activity が再開すれば表示は維持
+- 再開しないなら kill 経路の WakeLock leak を OS 側で自動解除
+- `ON_START` のたびに `wl.takeIf { !it.isHeld }.acquire(KEEP_ON_TIMEOUT_MS)` で timeout を refresh
+
+#### 4.10.5 `KeepOnHandle` (AutoCloseable)
+
+`acquireWhileStarted` の戻り値で `LifecycleEventObserver` と `WakeLock` の両方を所持。`close()` で:
+1. `lifecycle.removeObserver(observer)` (observer leak 防止)
+2. `wl.takeIf { it.isHeld }.release()` (WakeLock 解放)
+
+Compose の `DisposableEffect.onDispose { handle.close() }` で必ず呼ぶ契約 (`ConversationScreen` §4.8.7)。
+
+### 4.11 構造化ログ
 
 ```kotlin
 object StructuredLog {

@@ -15,15 +15,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 
 /**
- * AudioRecord 経由で 24kHz mono PCM16 を 1 frame=[TranscriptionConfig.chunkMs] ms 単位で
- * `frames` に流す (docs/03 §3.2.5、TranscriptionClient pre-buffer は §3.2.5.4)。
- *
- * - `VOICE_RECOGNITION` audio source を使い、Android 側で AEC / NS が薄く効くようにする。
- *   音楽 mic ではない (歌の transcription はターゲットではない)。
- * - 起動失敗パターン (state != INITIALIZED) は早期 return で log のみ。例外を投げない。
- *   呼び出し側 (TranscriptionClient) は frames が来ないことを timeout で検知する。
- * - 録音中は IO dispatcher に貼り付け、blocking read で chunk を吐く。`Job.cancel` で
- *   ループ脱出 → rec.stop + release。
+ * AudioRecord wrapper (docs/03 §3.2.5.12)。VOICE_RECOGNITION 選択、起動失敗の早期 return /
+ * IO dispatcher blocking read / `_frames` buffer policy / drop frame sampling log (P2-6) は
+ * §3.2.5.12 を参照。
  */
 internal class MicCapture(
     private val config: TranscriptionConfig,
@@ -31,16 +25,12 @@ internal class MicCapture(
 ) : MicCaptureSource {
     private val log = StructuredLog("channel.mic")
 
-    // pre-buffer に積まれる前段なので SUSPEND は不要だが、起動直後の burst を取りこぼさないため
-    // 64 frame (~2.5s @ 40ms) のバッファを確保。
     private val _frames = MutableSharedFlow<ByteArray>(
         extraBufferCapacity = 64,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     override val frames: Flow<ByteArray> = _frames.asSharedFlow()
 
-    // P2-6: silent drop は transcript 品質低下に直結するので、サンプリングして警告する。
-    // 10 件目ごとに 1 行 log。実機 deployment 後の field 解析で見えるように。
     private var droppedFrames: Long = 0L
 
     private var job: Job? = null
@@ -85,6 +75,7 @@ internal class MicCapture(
                         val chunk = if (n == buf.size) buf.copyOf() else buf.copyOf(n)
                         val emitted = _frames.tryEmit(chunk)
                         if (!emitted) {
+                            // docs/03 §3.2.5.12 (P2-6): 10 件ごとにサンプリング warn。
                             droppedFrames++
                             if (droppedFrames % 10 == 0L) {
                                 log.warn("mic_frame_dropped", "total_dropped" to droppedFrames)
