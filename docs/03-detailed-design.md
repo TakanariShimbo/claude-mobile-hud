@@ -2087,6 +2087,47 @@ Phase 4 着手前準備で確定済み (`gradle/libs.versions.toml` 参照):
 - Unit test がカバレッジ目標を満たす
 - Wire parity CI が green
 
+### 10.4 Phase 4 完了報告 (2026-05-17)
+
+実機 (Pixel 8 + Rokid Glass) + PC (Ubuntu / Hub + Bridge) で主要シナリオを
+通し、§10.3 の完了基準を満たした:
+
+- ✅ 全クラスが本文書通りのシグネチャで実装
+- ✅ 主要 user 操作が手動で動く (#171–#177 シナリオ確認):
+  - 通知タップ session 遷移 (起動中 / bg)
+  - 画像添付送信 (claude が画像を認識する)
+  - Hub 再起動 → permission_snapshot reconcile
+  - AuthFailed → 手動 reconnect
+  - kill verdict (inproc 経路、cold-start path は Phase 5)
+  - BT SCO 失敗時の Phone マイク fallback (Phone マイク経路、自動切替は Phase 5)
+- ⏳ Unit test カバレッジは部分達成 (test infra 整備が必要、Phase 5 持ち越し)
+- ✅ Wire parity CI (`.github/workflows/ci.yml`) all green
+
+#### 10.4.1 Phase 4 終盤で発見・修正したバグ (設計穴の発掘)
+
+POC port の最終段階で 5 件の設計穴 / 実装抜けが見つかり、本書 §3 / §5 と
+合わせて修正した:
+
+| 修正 commit | 概要 | 設計穴の場所 |
+|---|---|---|
+| `519e8af` | Glass session list を active のみに filter (FR-GL-20 抜け) | §3.4.1 |
+| `ceedafe` | 画像添付の base64 化が `// TODO` のままで Hub に送られていなかった | §3.2.1.1 / §6.2.4 |
+| `d894b87` | Hub 再起動経路で permission 通知が cancel されない (FR-HU-15 の Phone 側不在) + cold-start gap 対処 | §5.3 / §5.3.1 |
+| `56deee1` | non-ASCII token を `IllegalArgumentException` ではなく `AuthFailed` に翻訳 | §3.2.2 |
+| `66f8b62` | AuthFailed 時の send/verdict 連打で UI が flapping するのを early return で gate | §3.2.1 |
+
+#### 10.4.2 Phase 5 への引き継ぎ
+
+| 項目 | task | 補足 |
+|---|---|---|
+| GlassRelay unit test (session list active filter / current_session 非フィルタ含む) | #179 | test infra (FakeChannelRepository) の整備込み |
+| BtAudioRouter fallback 自動切替の unit test | #183 | 実機再現不能 (CXR-L が BT 経由のため Glass connection が先に切れる) |
+| VerdictDispatchService cold-start NFR-14 (5s) 実機測定 | #182 | force-stop で通知消失 / am kill で FGS 拒否 のため §7.2 AC-09 logcat 解析と一緒に枠組み化 |
+| AC-09 自動検証 ランナー実装 | — | §7.2 既載 (実機 logcat → Python `verify_atomicity.py`) |
+| Bridge auto-reconnect + outstanding resend | — | §5.3 既載 (Hub 単独再起動を透過化、現在は wrapper 全停止再起動が運用) |
+| Hub TLS 終端 | — | §3.2.2 既載 (debug overlay の cleartext を Phase 5 で削除可能) |
+| Settings 保存時 input validation | (#181 nit) | non-ASCII / 空 token を入力段階で弾いて round-trip を省く UX 改善 |
+
 ---
 
 ## 11. Phase 1 への遡及修正 (Rev 5、本 commit 同梱)
