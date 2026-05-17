@@ -2904,9 +2904,79 @@ const ERROR_CODES = {
 
 #### 5.2.2 `HttpServer`
 
-- POST `/send`, POST `/permission`, GET `/events` (SSE) を提供
-- X-Token 検証 (NFR-20)
-- 接続切れの検出 + 自動再接続耐性
+Phone ↔ Hub の HTTP/SSE server。`0.0.0.0` で listen し、LAN / Tailscale どちらの
+NIC からも受ける (§5.5.2 と対)。エンドポイント:
+
+| method | path | 用途 |
+|---|---|---|
+| POST | `/send` | text + 画像 を Bridge 経由で Claude へ |
+| POST | `/permission` | verdict を Bridge 経由で Claude へ |
+| GET  | `/events` | SSE。接続成立直後に snapshot を順送 (§5.2.4) |
+
+##### 5.2.2.1 X-Token 認証 (NFR-20) と timing-safe 比較
+
+config の `token` が non-null のときは全 endpoint で `X-Token` header を要求し、
+`constantTimeEquals` (`node:crypto.timingSafeEqual`) で比較する。文字列の `===` は
+最初に差異が出た文字で短絡するため、ms オーダーの timing leak で token を 1 文字ずつ
+brute force される攻撃 (NFR-20) を防ぐ目的で固定時間比較が必須。`token === null` の
+場合は認証無効 (開発時のみ、`.env` で token 未指定の運用)。
+
+##### 5.2.2.2 BODY_LIMIT_BYTES = 16 MB + 上限超過後の drain 戦略
+
+`/send` は `image_base64` を含むので body 上限を 16 MB と大きめに取る。上限超過を
+検知したら以降の chunks を accumulate せずに **req は drain し続ける** (= ストリーム
+は最後まで読む)。理由: `req.destroy()` で即切断すると client が ECONNRESET でレスポンス
+を受け取れない (= `image_too_large` の error_code が Phone に届かない)。drain しきった
+後で 400 を JSON body 付きで返す方が、Phone 側の error 表示まで含めた UX が安定する。
+
+##### 5.2.2.3 `mapReadError` の endpoint 分岐
+
+`too_large` を返す経路は `/send` (画像込み) と `/permission` で意味が違う:
+
+- `/send` の `too_large` → `IMAGE_TOO_LARGE` (Phone は image_too_large として UI 通知)
+- `/permission` の `too_large` → `INVALID_PAYLOAD` (本文が軽い endpoint で上限超過は payload 壊れ)
+
+`invalid_json` / `empty` はどちらも `INVALID_PAYLOAD`。
+
+##### 5.2.2.4 `resolveSessionId`: 単一 session で自動採用
+
+`/send` の body に `session_id` が無いときの解決:
+
+- active session 数 = 1 → その唯一の session を採用 (Phone の UX 単純化)
+- active session 数 ≠ 1 (0 or 複数) → null を返して `SESSION_NOT_ACTIVE` で 4xx
+
+`session_id` を明示指定した場合は `SessionRegistry.get()` で存在検証してから採用。
+存在しない session_id は null → 4xx。
+
+##### 5.2.2.5 `dispatchVerdict` 失敗時の Phone abort broadcast (P1-1)
+
+verdict の Bridge への転送が失敗した場合、Phone 側は既に pending entry を消して
+verdict を送ったつもりになっている (= Phone の local state は「verdict 送信済」)。
+Hub 側でこの不整合を残すと「verdict 送ったのに UI に反映されない」体感バグになる。
+対策として失敗パスでは:
+
+1. `permission_abort` を Phone に broadcast (`reason: "no_session"` / `"dispatch_failed:<reason>"`)
+2. `/permission` 自体は 400 で `SESSION_NOT_ACTIVE` を返す
+
+を両方やる。broadcast で Phone の visual state を同期し、4xx で UI に「verdict は届かなかった」を明示する二重化。
+
+`dispatchVerdict` の `boolean` 戻り値はこの **response 二重送防止** チャンネル: `false` を
+返すときは「失敗 path で既に `res` へ 4xx を書いた」ことを意味し、caller
+(`handlePermission`) は追加 response を送らない (success の場合のみ caller が 200 と
+ログを emit する)。
+
+##### 5.2.2.6 `entry.sessionId === null` 経路 = race 徴候
+
+Outstanding entry の `sessionId` は通常 non-null (`BridgePermissionMessage` で必ず
+session_id が来るため)。null が来る経路は、protocol の future extension や bug の
+徴候 (= race condition の可能性)。`verdict_no_session` warn ログを吐いてから上記
+P1-1 ルートで abort broadcast + 4xx を返す。
+
+##### 5.2.2.7 `/events` snapshot 順送
+
+SSE 接続成立直後に `session_snapshot` → `permission_snapshot` → 個別 `permission`
+(`createdAtMs` 昇順) の順で snapshot を送出する (詳細フォーマットは §5.2.4)。
+keepAlive timer (`sseKeepAliveMs` 既定 15s) で proxy の idle timeout を回避。
 
 #### 5.2.3 `BridgeServer` + `OutstandingPermissions`
 
@@ -2954,6 +3024,75 @@ class OutstandingPermissions {
     }
 }
 ```
+
+##### 5.2.3.1 127.0.0.1 専用 listen (NFR-22)
+
+`BridgeServer` は **loopback (`127.0.0.1`) でしか listen しない**。Bridge は同 host
+の Claude Code から spawn された子プロセスで、外部 LAN からの TCP は届く必要が無い。
+NFR-22 (Bridge 通信を外部 NIC に晒さない) を listen host で物理的に保証する設計。
+
+##### 5.2.3.2 `BridgeDispatchResult` discriminated union
+
+`sendToSession` の戻り値は `{ ok: true } | { ok: false; reason: "not_registered" |
+"write_failed" }`。呼び元 (`HttpServer.handleSend` / `dispatchVerdict`) が失敗理由
+ごとに処置を分けられるよう reason を含める:
+
+- `not_registered`: 該当 `session_id` の socket が `SessionRegistry` に無い
+  (Bridge 未起動 or 死亡)
+- `write_failed`: socket は存在したが write が失敗 (destroyed / 同期 throw)
+
+呼び元はどちらも `SESSION_NOT_ACTIVE` を Phone に返すが、ログには `reason` を残して
+post-mortem を可能にする。
+
+##### 5.2.3.3 `writeNdjson` の backpressure は `ok:true` 維持
+
+`socket.write` が false を返した (= kernel send buffer 満杯) ケースは `write_backpressure`
+warn ログを吐くが **戻り値は `ok: true`**。kernel buffer には乗っているので drop では
+なく、Node の `drain` event で自然に流れる。`ok: false` に倒すと Phone に
+`SESSION_NOT_ACTIVE` が誤通知される。一方 `destroyed` / `writableEnded` / 同期 throw は
+`write_failed` で `ok: false`。
+
+##### 5.2.3.4 NDJSON line buffer の split
+
+`onData` で `state.buffer` に utf-8 chunk を蓄積し、`\n` を見つけるたびに行を取り出して
+`handleLine` に流す。chunk 境界が JSON object の途中に来る (kernel buffer や MTU
+事情) ケースで JSON.parse が壊れないよう、行単位の framing は Hub 側で必ず buffer
+する必要がある (TCP は stream で message 境界を保たない)。
+
+##### 5.2.3.5 register-then-validate 三段ガード
+
+ハンドラ入口で以下 3 つを連続して check し、すべて通った時だけ実処理に進む:
+
+| ガード | 条件 | 失敗時 |
+|---|---|---|
+| `state.sessionId !== null` 既存 | `register` 二重発火 | `double_register` warn + 無視 |
+| `state.sessionId !== null` 必須 (`rejectIfNotRegistered`) | `register` 前に reply/permission 等 | `msg_before_register` warn + 無視 |
+| `state.sessionId === msg.session_id` (`rejectIfSessionMismatch`) | 1 socket = 1 session の trust boundary | `session_id_mismatch` warn + 無視 |
+
+trust boundary 違反を 4xx ではなく **silent reject** にしている理由: Bridge は同 host
+の子プロセスで、本来 mismatch は起こり得ない (= bug or 攻撃)。後者なら過剰応答せず
+ログだけ吐く方が攻撃面が小さい。
+
+##### 5.2.3.6 知らない `request_id` の `permission_abort` は broadcast しない (P1-2)
+
+Bridge から `permission_abort` が来たが `OutstandingPermissions.remove` が
+`undefined` を返した (= Hub の outstanding にいない) ケースは Phone に broadcast
+しない。Phone は既に local pending から消去している (verdict 送信済 or 自発 dismiss)
+ので、broadcast すると **存在しない pending を消そうとする noise** が Phone 通知
+shade に出る。debug ログだけ吐いて drop。
+
+##### 5.2.3.7 Bridge 切断時の FR-HU-13 一括 abort
+
+socket `close` event で `onClose` が発火し、当該 `bridgeSessionId` 由来の outstanding
+を `OutstandingPermissions.onBridgeDisconnected` で一斉に Phone へ abort broadcast +
+内部からも削除する。これにより Bridge が死んだあとも Phone に幽霊 pending が残らない
+(FR-HU-13)。`session_inactive` も同時に broadcast し、Phone 側 session list を更新。
+
+##### 5.2.3.8 exhaustive `never` で wire 型 drift 検出
+
+`handleLine` の `switch (msg.type)` 末尾で `const _exhaust: never = msg;` を入れ、
+`BridgeToHubMessage` union に新 variant が増えたらコンパイル時に拒否させる
+(HubClient §6.2.2.7 と同形のガード)。
 
 #### 5.2.4 SSE 再接続時の push シーケンス
 

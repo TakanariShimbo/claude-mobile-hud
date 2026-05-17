@@ -1,5 +1,4 @@
-// Bridge ↔ Hub の TCP NDJSON server。Phase 3 §5.2.3 / §5.2.4。
-// Loopback (127.0.0.1) でしか listen しない (NFR-22)。
+// docs/03 §5.2.3: Bridge ↔ Hub の TCP NDJSON server。127.0.0.1 専用 listen (§5.2.3.1, NFR-22)。
 
 import { createServer, type Server, type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
@@ -15,16 +14,11 @@ import type {
     RegisterMessage,
 } from "../wire/BridgeWire.js";
 
-/**
- * Bridge への送信結果。失敗 reason は呼び元で扱い分けられるよう discriminated union。
- * - `not_registered`: 該当 session_id の socket が SessionRegistry に存在しない
- * - `write_failed`: socket は存在したが write が失敗 (destroyed / 同期 throw 等)
- */
+/** docs/03 §5.2.3.2: 呼び元が失敗 reason で処置を分けられるよう discriminated union。 */
 export type BridgeDispatchResult =
     | { readonly ok: true }
     | { readonly ok: false; readonly reason: "not_registered" | "write_failed" };
 
-/** 別モジュールから注入される dispatch コールバックの型 (HttpServer 側で使用)。 */
 export type BridgeDispatcher = (sessionId: string, msg: HubToBridgeMessage) => BridgeDispatchResult;
 import type {
     PermissionAbortSse,
@@ -96,6 +90,7 @@ export class BridgeServer {
         try {
             const ok = socket.write(JSON.stringify(msg) + "\n");
             if (!ok) {
+                // docs/03 §5.2.3.3: backpressure は kernel buffer 到達済 = ok:true 維持。
                 this.deps.logger.warn("write_backpressure", { type: msg.type });
             }
             return { ok: true };
@@ -129,6 +124,7 @@ export class BridgeServer {
         if (!state) return;
         state.buffer += chunk;
 
+        // docs/03 §5.2.3.4: chunk 境界が JSON 内に来るため line buffer で framing 必須。
         let nl = state.buffer.indexOf("\n");
         while (nl >= 0) {
             const line = state.buffer.slice(0, nl).trim();
@@ -165,7 +161,7 @@ export class BridgeServer {
                 this.handlePermissionAbort(state, msg);
                 return;
             default: {
-                // 型網羅性チェック (将来 type を追加した時に compile error)。
+                // docs/03 §5.2.3.8: union 拡張時の compile-time guard。
                 const _exhaust: never = msg;
                 void _exhaust;
                 this.deps.logger.warn("unknown_message", { line_head: line.slice(0, 80) });
@@ -176,6 +172,7 @@ export class BridgeServer {
 
     private handleRegister(socket: Socket, state: SocketState, msg: RegisterMessage): void {
         if (state.sessionId !== null) {
+            // docs/03 §5.2.3.5: 二重 register は silent reject (trust boundary 違反、bug 徴候)。
             this.deps.logger.warn("double_register", {
                 bridge_session_id: state.bridgeSessionId,
                 existing_session_id: state.sessionId,
@@ -202,10 +199,7 @@ export class BridgeServer {
         });
     }
 
-    /**
-     * register 前に届いたメッセージは reject + warn log。
-     * §6.3 / Phase 3 §1.3 D-中。
-     */
+    /** docs/03 §5.2.3.5: register 前メッセージは silent reject + warn (§1.3 D-中)。 */
     private rejectIfNotRegistered(state: SocketState, msgType: string): boolean {
         if (state.sessionId !== null) return false;
         this.deps.logger.warn("msg_before_register", {
@@ -215,10 +209,7 @@ export class BridgeServer {
         return true;
     }
 
-    /**
-     * Bridge は 1 socket = 1 session。msg.session_id と socket の session_id が
-     * 食い違う場合は trust boundary 違反として reject + warn log。
-     */
+    /** docs/03 §5.2.3.5: 1 socket = 1 session の trust boundary 違反は silent reject。 */
     private rejectIfSessionMismatch(state: SocketState, msgSessionId: string, msgType: string): boolean {
         if (state.sessionId === msgSessionId) return false;
         this.deps.logger.warn("session_id_mismatch", {
@@ -269,9 +260,8 @@ export class BridgeServer {
         if (this.rejectIfNotRegistered(state, "permission_abort")) return;
         const removed = this.deps.outstanding.remove(msg.request_id);
         if (!removed) {
+            // docs/03 §5.2.3.6: 知らない request_id は Phone broadcast しない (noise 防止、P1-2)。
             this.deps.logger.debug("abort_unknown_request", { request_id: msg.request_id });
-            // 知らない request_id の abort は Phone に broadcast しない (P1-2)。
-            // Phone は既に消去済み or そもそも知らないので、broadcast すると不要な noise になる。
             return;
         }
         const sse: PermissionAbortSse = {
@@ -298,7 +288,7 @@ export class BridgeServer {
             };
             this.deps.phoneBroadcast(inactivate);
         }
-        // FR-HU-13: 当該 bridge 由来の outstanding を abort
+        // docs/03 §5.2.3.7: 当該 bridge 由来の outstanding を Phone へ一斉 abort (FR-HU-13)。
         this.deps.outstanding.onBridgeDisconnected(state.bridgeSessionId, (abort) =>
             this.deps.phoneBroadcast(abort),
         );

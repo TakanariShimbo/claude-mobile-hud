@@ -1,9 +1,5 @@
-// Phone ↔ Hub の HTTP/SSE server。Phase 3 §5.2.2 / §5.2.4。
-//
-// エンドポイント:
-//   POST /send         text/image を Bridge 経由で Claude へ
-//   POST /permission   verdict を Bridge 経由で Claude へ
-//   GET  /events       SSE。接続成立直後に session_snapshot → permission_snapshot → 個別 permission
+// docs/03 §5.2.2: Phone ↔ Hub の HTTP/SSE server。
+//   POST /send / POST /permission / GET /events (SSE snapshot は §5.2.4)
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
@@ -36,7 +32,8 @@ export interface HttpServerDeps {
     sseKeepAliveMs: number;
 }
 
-const BODY_LIMIT_BYTES = 16 * 1024 * 1024; // 16 MB (image_base64 を含むので大きめ)
+// docs/03 §5.2.2.2: image_base64 を含むため大きめに取り、超過後は drain を続ける。
+const BODY_LIMIT_BYTES = 16 * 1024 * 1024;
 
 type ReadJsonError = "too_large" | "invalid_json" | "empty";
 type ReadJsonResult<T> = { ok: true; body: T } | { ok: false; error: ReadJsonError };
@@ -58,7 +55,6 @@ export class HttpServer {
         });
     }
 
-    /** BridgeServer.deps.phoneBroadcast に渡す */
     broadcast(event: PhoneSseEvent): void {
         this.sse.broadcast(event);
     }
@@ -90,7 +86,7 @@ export class HttpServer {
 
     private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
         if (!this.checkAuth(req, res)) return;
-        // querystring がついていても path 一致を許す (例: /events?ts=12345)。
+        // querystring 付き (`/events?ts=12345`) を path 一致で許容。
         const path = new URL(req.url ?? "/", "http://x").pathname;
         const method = req.method ?? "GET";
 
@@ -107,6 +103,7 @@ export class HttpServer {
         if (expected === null) return true;
         const provided = req.headers["x-token"];
         const tokenStr = Array.isArray(provided) ? provided[0] : provided;
+        // docs/03 §5.2.2.1: timing-safe 比較 (NFR-20)。
         if (!constantTimeEquals(tokenStr ?? "", expected)) {
             this.sendError(res, ERROR_CODES.AUTH_FAILED, "X-Token mismatch");
             return false;
@@ -137,7 +134,7 @@ export class HttpServer {
             chat_id: chatId,
             text: body.text,
         };
-        // image は base64 のまま Bridge へ転送 (Bridge が staging する: Phase 3 §6.2.4)
+        // docs/03 §6.2.4: image は base64 のまま Bridge へ転送 (Bridge が staging)。
         if (typeof body.image_base64 === "string" && body.image_base64.length > 0) {
             sendMsg.image_base64 = body.image_base64;
         }
@@ -191,18 +188,13 @@ export class HttpServer {
         });
     }
 
-    /**
-     * verdict を Bridge へ転送。失敗時は Phone へ abort broadcast + 4xx 返却 (P1-1)。
-     * @returns success の場合 true。失敗で response を既に送った場合 false。
-     */
+    /** docs/03 §5.2.2.5 / §5.2.2.6: 失敗時は Phone abort broadcast + 4xx で同期 (P1-1)。 */
     private dispatchVerdict(
         entry: OutstandingEntry,
         behavior: "allow" | "deny",
         res: ServerResponse,
     ): boolean {
         if (entry.sessionId === null) {
-            // session 不明の outstanding は本来 race の徴候。Phone は entry を既に消したので
-            // permission_abort で同期させる。
             this.deps.logger.warn("verdict_no_session", { request_id: entry.requestId });
             this.broadcast({
                 type: "permission_abort",
@@ -242,7 +234,7 @@ export class HttpServer {
         res.flushHeaders?.();
         this.sse.add(res);
 
-        // §5.2.4: snapshot 順送
+        // docs/03 §5.2.2.7 / §5.2.4: 接続成立直後の snapshot 順送。
         const sessionSnapshot: SessionSnapshotSse = {
             type: "session_snapshot",
             active_session_ids: this.deps.sessions.activeIds(),
@@ -267,7 +259,7 @@ export class HttpServer {
         return Promise.resolve();
     }
 
-    /** session_id 指定なし時の解決: 1 セッションなら自動採用、複数なら null。 */
+    /** docs/03 §5.2.2.4: 単一 active session で session_id 省略時の自動採用。 */
     private resolveSessionId(requested: string | undefined): string | null {
         if (requested) {
             return this.deps.sessions.get(requested) ? requested : null;
@@ -289,9 +281,9 @@ export class HttpServer {
     }
 }
 
+// docs/03 §5.2.2.3: /send は IMAGE_TOO_LARGE、/permission は INVALID_PAYLOAD に倒す。
 function mapReadError(err: ReadJsonError, endpoint: "send" | "permission"): ErrorCode {
     if (err === "too_large") {
-        // /send は base64 画像が含まれうるので IMAGE_TOO_LARGE。/permission は本文小なので INVALID_PAYLOAD。
         return endpoint === "send" ? ERROR_CODES.IMAGE_TOO_LARGE : ERROR_CODES.INVALID_PAYLOAD;
     }
     return ERROR_CODES.INVALID_PAYLOAD;
@@ -305,9 +297,7 @@ async function readJsonBody<T>(req: IncomingMessage): Promise<ReadJsonResult<T>>
         const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
         size += buf.length;
         if (size > BODY_LIMIT_BYTES) {
-            // 上限超過後は accumulate を止めるが、req は drain し続ける (client に
-            // 応答を返すための socket を生かす)。req.destroy() すると client は
-            // ECONNRESET でレスポンスを受け取れない。
+            // docs/03 §5.2.2.2: req.destroy() すると client が ECONNRESET になるので drain 継続。
             overLimit = true;
             continue;
         }
