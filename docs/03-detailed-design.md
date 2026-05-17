@@ -1039,11 +1039,71 @@ override fun onCreate() {
 
 #### 3.3.3 `GlassConnectionService`
 
-`AppLifecycleController.startGlassSession` から起動される FGS。役割:
-- CXR-L 接続管理
+`AppLifecycleController.startGlassSession` から起動される FGS-dataSync。役割:
+- CXR-L 接続管理 (token 取得 → connect → L+BT → appStart → SessionOpen → 5s heartbeat)
 - 自然切断検出時に **`AppLifecycleController.onGlassDisconnected(context)` を呼ぶ** (Mic FGS を直接知らない)
 - onCreate / onDestroy で **`AppLifecycleController.onFgsLifecycle(GLASS_CONNECTION, ...)` を呼ぶ**
-- 受信メッセージは `GlassEventDispatcher` (Repository scope) に流す
+- 受信 payload を [`CapsCodec`] で decode し、companion の `events: SharedFlow<WireEvent>` に push (`GlassEventDispatcher` が collect、§3.4.2)
+- 送信用 callback を companion の `sender: StateFlow<((ByteArray) -> Unit)?>` で公開 (`GlassRelay` が collect、§3.4.1)
+
+##### 3.3.3.1 接続シーケンス
+
+```
+onStartCommand → CXRLink(this) を生成
+  - configCXRSession(CUSTOMAPP, "com.example.claudemobilehud.glass")
+  - setCXRLinkCbk(onCXRLConnected / onGlassBtConnected)
+  - setCXRCustomCmdCbk(onCustomCmdResult: rk_custom_key 受信時 handleIncoming)
+  - connect(token)
+
+CXR-L L 接続 + Glass BT 接続が両方 true → CONNECTED
+  → 1 回だけ cxrLink.appStart("...glass.MainActivity", IGlassAppCbk)
+
+onOpenAppResult(true) / onGlassAppResume(true) のどちらかが返る (両経路あり)
+  → sessionOpened を 1 度だけ true にして
+  → SessionOpen wire を送信、_sender.value = sendCustomCmd、5s heartbeat 開始
+```
+
+heartbeat は `Handler(Looper.getMainLooper())` 経由で `HEARTBEAT_INTERVAL_MS = 5_000L`。`Ping(ts)` を `rk_custom_client` channel に送る。
+
+##### 3.3.3.2 binder thread → main handler 集約 (P2-2)
+
+CXR-L callback (`onCXRLConnected` / `onGlassBtConnected` / `onCustomCmdResult`) は **AIDL binder thread** で呼ばれる。state 更新 (`lConnected` / `btConnected` の compare-then-set や `refreshConnState`) を binder thread から直接行うと race を踏むので、すべて `mainHandler.post { ... }` で main thread に集約する。
+
+##### 3.3.3.3 stop/start race と `currentInstance` ガード (P2-1)
+
+companion state (`_sender` / `_connState` / `currentInstance`) は process singleton。古いインスタンスの `onDestroy` が新しいインスタンスの companion state を消さないよう、`@Volatile var currentInstance: GlassConnectionService?` で**現役 pointer** を持ち、`onDestroy` 内で `currentInstance === this` のときだけ state をリセットする:
+
+```kotlin
+override fun onCreate() {
+    currentInstance = this    // 上書きで新インスタンスを現役化
+    ...
+}
+
+override fun onDestroy() {
+    ...
+    if (currentInstance === this) {
+        currentInstance = null
+        _sender.value = null
+        _connState.value = GlassCxrState.DISCONNECTED
+    }
+}
+```
+
+##### 3.3.3.4 自然切断検出
+
+`refreshConnState` が `prev == CONNECTED && next != CONNECTED` を検出したら **`AppLifecycleController.onGlassDisconnected(context)`** を呼ぶ。これにより Glass FGS + Mic FGS を `Stopping(false)` に畳む経路に入る (§3.3.1 遷移表)。
+
+##### 3.3.3.5 `appStart` の冪等化 (P2-4)
+
+`IGlassAppCbk.onOpenAppResult(true)` と `IGlassAppCbk.onGlassAppResume(true)` は **両方 `onAppOpened()` 経路に来る**。重複 `SessionOpen` 送信を避けるため `sessionOpened` boolean で 1 回ガードする。
+
+##### 3.3.3.6 受信 payload の SharedFlow emit (P2-5)
+
+`onCustomCmdResult(key = rk_custom_key, payload)` で受けた payload は `codec.decode()` で `WireEvent` に戻し、`_events.tryEmit(event)` で `SharedFlow` に push する。buffer 満杯 + subscriber 不在で `tryEmit` が false を返した場合は silent drop を避けるため warn log を残す。
+
+##### 3.3.3.7 `START_STICKY` 選択 + `onDestroy` の `SessionClose` (P2-3)
+
+`onStartCommand` は `START_STICKY` 戻し。OS kill 後 redeliver で `TokenStore.token.value` を読み直し接続復帰する。`onDestroy` は `mainHandler.removeCallbacks(heartbeat)` → `SessionClose` wire 送信 (best-effort runCatching) → `cxrLink.disconnect()` の順で畳む。token 更新で running session を再接続する hook は 4c2 検討項目 (P3-3)。
 
 #### 3.3.4 `MicForegroundService`
 

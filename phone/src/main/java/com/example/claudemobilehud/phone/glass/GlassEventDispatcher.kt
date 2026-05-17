@@ -19,16 +19,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Glass からの wire event を Repository action に変換する。Phase 3 §3.4.2。
- *
- * - Hello: 再接続時の初期同期トリガ。Relay の `refresh()` を叩いて現在 state を再 push。
- * - SelectSession: session 切替。
- * - GestureEvent: tap → start/stop transcription、swipe_forward → send、swipe_back → clear。
- * - ListeningCancel: transcription 停止 + input クリア。
- * - PermissionVerdictEvent: Hub に POST /permission を中継。
- *
- * 設計上 Phone → Glass の event が Glass → Phone 経由で戻ってくることは無いので、
- * その他の `WireEvent` 派生は warn log で drop する。
+ * Glass からの wire event を Repository action に変換する (docs/03 §3.4.2)。
+ * gesture handling の race-free 設計 (sessionId snapshot / wasListening / inputText snapshot)
+ * は §3.4.2.1 を参照。
  */
 class GlassEventDispatcher(
     private val repository: ChannelRepository,
@@ -81,29 +74,20 @@ class GlassEventDispatcher(
                 repository.respondPermission(event.requestId, event.decision)
             }
             is Ping -> {
-                // P3-7: heartbeat ping は Phone→Glass→Phone の echo になる可能性があり、
-                // warn を出さずに silently 受け流す。
+                // P3-7: Phone→Glass→Phone echo 経路があり得るので silently 受け流す。
             }
             else -> {
-                // Phone → Glass で送出するイベント (CurrentState 等) や CXR 内部 event は
-                // Glass 側で生成して送り返してこないはず。observability のため warn 残す。
                 log.warn("glass_unhandled_wire_event", "type" to event::class.simpleName.orEmpty())
             }
         }
     }
 
     private suspend fun handleGesture(which: GestureKind) {
-        // P2-A of review: gesture 受信時点の current session を冒頭で snapshot し、
-        // `setConfirming(sessionId, ...)` に明示渡しする。`setConfirming(null, ...)` で
-        // Repository 内 re-lookup させると、auto-switch / 通知タップ等で session が
-        // 切替わると理論上は race を踏み別 session に flag が立ちうるため、明示 snapshot で防ぐ。
+        // docs/03 §3.4.2.1 P2-A: gesture 受信時点の current session を snapshot。
         val sessionIdAtGesture = repository.uiState.value.currentSessionId
         when (which) {
             GestureKind.TAP -> {
-                // Listening → 停止すると同時に当該 session の confirming flag を立てる
-                // (Idle → 録音開始は flag を触らない)。「was listening」判定は
-                // toggleTranscription を呼ぶ**前**にしないと、stop 後の state を見て false 判定
-                // になる race を踏む。
+                // docs/03 §3.4.2.1: wasListening は toggleTranscription 前に評価する。
                 val wasListening = repository.input.transcription.state.value.let {
                     it is TranscriptionClient.State.Listening ||
                         it is TranscriptionClient.State.Connecting
@@ -112,23 +96,17 @@ class GlassEventDispatcher(
                 if (wasListening) repository.setConfirming(sessionIdAtGesture, true)
             }
             GestureKind.SWIPE_FORWARD -> {
-                // P1-4: inputText.value を launch 内で読むと、前回 send の clearInput()
-                // 完了タイミングによっては空文字を取りうる。ここで同期的に snapshot を取る。
-                // また handle() は collect の中で suspend で動いており、2 件目の
-                // SWIPE_FORWARD は前の send() suspend が return してから初めて評価
-                // されるため、二重送信は構造的に発生しない。
-                // 送信確定で confirming flag を畳む (送信成功側でも畳むが、
-                // 失敗時に CONFIRMING UI に戻りたいので両側で操作する)。
+                // docs/03 §3.4.2.1: inputText は launch 前に snapshot。送信失敗で CONFIRMING に
+                // 戻したい場合に備え confirming flag は送信成功側でも畳む (両側 idempotent)。
                 repository.setConfirming(sessionIdAtGesture, false)
                 val snapshot = repository.inputText.value
                 repository.send(snapshot)
             }
             GestureKind.SWIPE_BACK -> {
-                // 取消 / 入力クリア。confirming も同時に畳む。
                 repository.setConfirming(sessionIdAtGesture, false)
                 repository.clearInput()
             }
-            GestureKind.DOUBLE_TAP -> { /* Glass 側だけ session 選択画面に戻す。Phone 側は無処理。 */ }
+            GestureKind.DOUBLE_TAP -> { /* Glass 側で session 選択画面に戻す。Phone は無処理。 */ }
         }
     }
 

@@ -26,17 +26,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Phase 3 §3.3.3 の Glass FGS-dataSync。4c1 で CXR-L 接続本体を実装。
- *
- * 役割:
- *   - [TokenStore] から CXR-L token を取得し `CXRLink.connect`
- *   - L + BT が両方つながったら glass 側アプリを `appStart` で起動
- *   - 接続後 [SessionOpen] を送り通信を有効化、以降 5s heartbeat ([Ping])
- *   - 受信 payload を [CapsFactory] でデコードし [events] に流す
- *   - 送信は [sender] を `GlassRelay` から呼ぶ
- *
- * ライフサイクル callback (`AppLifecycleController.onFgsLifecycle`) は P2-5
- * 対応のまま維持。Glass 自然切断時は `onGlassDisconnected` で controller に通知。
+ * Glass FGS-dataSync (docs/03 §3.3.3)。接続シーケンス / binder thread 集約 / stop-start race /
+ * 自然切断 / appStart 冪等化 / SharedFlow emit / `START_STICKY` の各設計は §3.3.3.1-3.3.3.7 を参照。
  */
 class GlassConnectionService : Service() {
     private val log = StructuredLog("channel.glass")
@@ -59,9 +50,6 @@ class GlassConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // P2-1: companion state は process singleton。新インスタンスを
-        // currentInstance に登録しておき、古いインスタンスの onDestroy が
-        // 後追いで companion state を消さないようにガードする。
         currentInstance = this
         startForegroundCompat()
         notifyLifecycle(AppLifecycleController.FgsLifecycle.ON_CREATE)
@@ -77,8 +65,7 @@ class GlassConnectionService : Service() {
         btConnected = false
         appStarted = false
         sessionOpened = false
-        // P2-1: 自インスタンスが現役の場合のみ companion state をリセットする。
-        // stop/start レースで古いインスタンスが新しい session を kill しないように。
+        // docs/03 §3.3.3.3: 自インスタンスが現役のときだけ companion state をリセット。
         if (currentInstance === this) {
             currentInstance = null
             _sender.value = null
@@ -89,11 +76,6 @@ class GlassConnectionService : Service() {
         super.onDestroy()
     }
 
-    /**
-     * P2-3: OS kill 後 redeliver で TokenStore を読み直して接続復帰したいため
-     * `START_STICKY`。ChannelService と同じ resilience を持たせる。
-     * (P3-3 補足: token 更新で running session を再接続する hook は 4c2 検討。)
-     */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val token = TokenStore.token.value
         if (token.isNullOrBlank()) {
@@ -112,8 +94,7 @@ class GlassConnectionService : Service() {
             configCXRSession(
                 CxrDefs.CXRSession(CxrDefs.CXRSessionType.CUSTOMAPP, GLASS_APP_PKG),
             )
-            // P2-2: CXR-L callback は AIDL binder thread。state 更新を main handler に集約し
-            // refreshConnState の compare-then-set race を防ぐ。
+            // docs/03 §3.3.3.2: binder thread state 更新は mainHandler に集約。
             setCXRLinkCbk(object : ICXRLinkCbk {
                 override fun onCXRLConnected(connected: Boolean) {
                     mainHandler.post {
@@ -154,7 +135,7 @@ class GlassConnectionService : Service() {
             log.warn("glass_drop_unknown_payload", "bytes" to payload.size)
             return
         }
-        // P2-5: tryEmit が false 戻り (subscriber 不在 + buffer 満杯) のときに silent drop を回避。
+        // docs/03 §3.3.3.6: buffer 満杯時の silent drop を回避。
         if (!_events.tryEmit(event)) {
             log.warn(
                 "glass_event_buffer_overflow",
@@ -168,7 +149,7 @@ class GlassConnectionService : Service() {
             lConnected && btConnected -> GlassCxrState.CONNECTED
             else -> GlassCxrState.CONNECTING
         }
-        // 自然切断: 以前 CONNECTED で今 CONNECTING に落ちた場合は AppLifecycleController に通知。
+        // docs/03 §3.3.3.4: 自然切断検出 (CONNECTED → 非 CONNECTED)。
         val prev = _connState.value
         _connState.value = next
         if (prev == GlassCxrState.CONNECTED && next != GlassCxrState.CONNECTED) {
@@ -192,8 +173,7 @@ class GlassConnectionService : Service() {
     }
 
     private fun onAppOpened() {
-        // P2-4: onOpenAppResult(true) と onGlassAppResume(true) は両方この経路に来る。
-        // SessionOpen は 1 度だけ送る (Glass 側 idempotent 期待を避ける)。
+        // docs/03 §3.3.3.5: onOpenAppResult(true) と onGlassAppResume(true) は両方ここに来る。
         if (sessionOpened) return
         sessionOpened = true
         sendWire(SessionOpen(ts = System.currentTimeMillis()))
@@ -260,13 +240,11 @@ class GlassConnectionService : Service() {
         private val _events = MutableSharedFlow<WireEvent>(extraBufferCapacity = 64)
         val events: SharedFlow<WireEvent> = _events.asSharedFlow()
 
-        /**
-         * Glass へ送信するための callback。null = 未接続。GlassRelay が collect して使う。
-         */
+        /** GlassRelay が collect して Glass への送信に使う。null = 未接続。 */
         private val _sender = MutableStateFlow<((ByteArray) -> Unit)?>(null)
         val sender: StateFlow<((ByteArray) -> Unit)?> = _sender.asStateFlow()
 
-        /** P2-1: stop/start race のための現役インスタンス pointer。`@Volatile` 必須。 */
+        /** docs/03 §3.3.3.3: stop/start race の現役インスタンス pointer。 */
         @Volatile
         private var currentInstance: GlassConnectionService? = null
     }
