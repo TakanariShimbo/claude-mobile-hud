@@ -331,6 +331,15 @@ class ChannelRepository(
      */
     suspend fun send(text: String) {
         if (text.isBlank() && _attachedImage.value == null) return
+        // P2-1 of 4d review: AuthFailed のときは送信を試みても 401 で確実に弾かれるので
+        // 早期 return + AuthFailed error emit。これで OUTGOING の flap (appendOutgoing →
+        // handleSendFailure の往復で input/image が一瞬消えて戻る) を防ぎ、連打 send 時に
+        // 入力が flapping するのを止める。ユーザは SettingsDialog (auto open) で token を
+        // 直し、Connectivity が Open に戻ってから再 send する。
+        if (connection.status.value == ConnectivityState.AuthFailed) {
+            _errors.tryEmit(TransientError.Shared(SharedWireError.Connection.AuthFailed))
+            return
+        }
         // 送信開始の時点で transcription 中なら停止 (これ以上の partial を input に書き込まない)。
         input.stop()
         val sessionId = sessionStore.snapshot.value.currentSessionId
@@ -416,6 +425,13 @@ class ChannelRepository(
     }
 
     suspend fun respondPermission(requestId: String, behavior: PermissionDecision) {
+        // send() と同じく AuthFailed のときは早期 return。verdict 送信は 401 で必ず弾かれ、
+        // outstanding は Hub 側に残ったまま (= 別経路で resolved になるまでフラッシュされない)。
+        // 通知シェードからの ALLOW/DENY 連打を flapping させない。
+        if (connection.status.value == ConnectivityState.AuthFailed) {
+            _errors.tryEmit(TransientError.Shared(SharedWireError.Connection.AuthFailed))
+            return
+        }
         val client = connection.client.value
         if (client == null) {
             _errors.tryEmit(TransientError.Shared(SharedWireError.Connection.NotConfigured))
