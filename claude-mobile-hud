@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# claude-mobile-hud — dispatcher CLI (POC の `claude-channel` に相当)
-# Phase 4 で本実装。
+# claude-mobile-hud — dispatcher CLI
+#
+# subcommands:
+#   hub / pair / run / resume / list-sessions / rotate-token / help
 
 set -euo pipefail
 
@@ -39,14 +41,14 @@ case "$CMD" in
         exec npm --prefix "$ROOT/hub" run --silent "pair:$MODE" -- "$@"
         ;;
     run)
-        # Claude Code セッションを起動 (safe / yolo モード)。POC `claude-channel run` の移植。
+        # Claude Code セッションを起動 (safe / yolo モード)。
         #
         # - cwd は呼び出し元のものをそのまま継承する (history slug が一致するよう、
         #   $ROOT に cd しない)。
         # - `.mcp.runtime.json` を bridge/ 配下に動的生成して `--mcp-config` で渡す。
-        #   user-scope (`~/.claude.json`) の MCP entry には依存しない (POC と同じ独立構成)。
+        #   user-scope (`~/.claude.json`) の MCP entry には依存しない独立構成。
         # - `--dangerously-load-development-channels server:channel` で Bridge が emit する
-        #   `notifications/claude/channel*` を claude に届ける gate を開ける。POC と同じ機構
+        #   `notifications/claude/channel*` を claude に届ける gate を開ける
         #   (Claude 2.x でも flag は受理される、`--help` から隠れただけ)。
         # - `--session-id <uuid>` で claude の履歴 slug を確定する。Bridge には別途
         #   `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID` で同じ UUID を inject する
