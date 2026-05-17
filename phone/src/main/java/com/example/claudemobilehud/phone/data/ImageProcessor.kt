@@ -33,7 +33,11 @@ import java.util.UUID
  *   - HEIC 変換 (Android が picker 経由でデコードできる形式に限定)。
  */
 object ImageProcessor {
-    private const val MAX_BYTES: Long = 20L * 1024 * 1024 // 20MB upper guard; Hub 側でも 25MB チェック
+    // Hub 側 `BODY_LIMIT_BYTES = 16MB` (image_base64 込みの POST body)。base64 化で
+    // 4/3 倍に膨らむ + JSON フレーム overhead を見込んで、raw 上限は 11MB とする。
+    // これより大きい画像を選んだ場合は picker 受け取り時点で即 fail-fast (ImageTooLarge)
+    // させ、大容量 upload を Hub に投げてから 413 で叩き落とされる UX を避ける。
+    private const val MAX_BYTES: Long = 11L * 1024 * 1024
 
     suspend fun encode(context: Context, uri: Uri): ImageAttachment = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver

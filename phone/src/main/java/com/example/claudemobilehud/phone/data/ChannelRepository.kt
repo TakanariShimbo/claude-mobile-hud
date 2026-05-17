@@ -2,6 +2,7 @@ package com.example.claudemobilehud.phone.data
 
 import android.content.Context
 import android.net.Uri
+import android.util.Base64
 import com.example.claudemobilehud.phone.data.error.PhoneWireError
 import com.example.claudemobilehud.phone.data.error.TransientError
 import com.example.claudemobilehud.phone.data.model.ChatMessage
@@ -23,6 +24,7 @@ import com.example.claudemobilehud.protocol.error.SharedWireError
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -351,11 +353,26 @@ class ChannelRepository(
             )
             return
         }
+        // ImageProcessor は localPath だけ持つ ImageAttachment を返す (`ImageProcessor.encode`
+        // 注釈参照)。Hub には `image_base64` + `image_mime` で渡す契約なので、ここで file →
+        // base64 を行う。読み込み失敗 (cache 削除 / 容量 etc) は handleSendFailure 経路で
+        // ロールバック (input/image 復元)。Hub 側は 16MB body limit (base64 込みのサイズ)。
+        val imageBase64: String? = image?.let { att ->
+            try {
+                withContext(Dispatchers.IO) {
+                    val bytes = File(att.localPath).readBytes()
+                    Base64.encodeToString(bytes, Base64.NO_WRAP)
+                }
+            } catch (err: Throwable) {
+                handleSendFailure(pending, text, image, err)
+                return
+            }
+        }
         val result = client.send(
             text = text,
             sessionId = sessionId,
             image = image,
-            imageBase64 = null, // 4b で ImageProcessor 結果を渡す
+            imageBase64 = imageBase64,
         )
         result
             .onSuccess { resp ->
