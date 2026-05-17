@@ -93,7 +93,20 @@ cp hub/.env.example hub/.env
 claude-mobile-hud rotate-token       # HUB_TOKEN を新規生成 + 書き込み
 ```
 
-### 4. Android (Phone + Glass) ビルド
+### 4. Claude Code 側の MCP 自動許可
+
+`~/.claude/settings.json` の `permissions.allow` に `mcp__channel__reply` を追加する。これがないと Bridge が Claude に reply を流すたびに permission prompt が出て、Phone 側の verdict が成立しなくなる (POC で言うと `mcp__android-bridge__reply` に相当)。
+
+```json
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": ["mcp__channel__reply"]
+  }
+}
+```
+
+### 5. Android (Phone + Glass) ビルド
 
 GitHub Release から APK を取得するか、ソースからビルドする。
 
