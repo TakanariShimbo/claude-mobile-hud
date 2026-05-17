@@ -1,7 +1,6 @@
 package com.example.claudemobilehud.phone.glass
 
 import android.content.Context
-import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import com.example.claudemobilehud.phone.data.InputController
 import com.example.claudemobilehud.phone.log.StructuredLog
@@ -28,15 +27,24 @@ import com.example.claudemobilehud.phone.log.StructuredLog
  * **P3-5**: `BLUETOOTH_CONNECT` は API 31+ で runtime permission。Manifest だけでは
  *   足りず実行時に granted を確認するか、SecurityException を全 BT path で catch する
  *   必要がある。本実装は後者を採用 (全ての BT 操作を `runCatching` で囲う)。
+ *
+ * **Phase 5 #183**: `AudioManagerLike` で抽象化し fallback path を unit test で押さえる。
  */
-class BtAudioRouter(private val applicationContext: Context) : InputController.AudioRouter {
+class BtAudioRouter internal constructor(
+    private val am: AudioManagerLike?,
+) : InputController.AudioRouter {
+
+    constructor(applicationContext: Context) : this(
+        AndroidAudioManagerLike.fromContext(applicationContext),
+    )
+
     private val log = StructuredLog("channel.glass.audio")
 
     @Volatile private var savedMode: Int = AudioManager.MODE_NORMAL
     @Volatile private var routed: Boolean = false
 
     override fun routeToGlassMic(): Boolean {
-        val am = applicationContext.getSystemService(AudioManager::class.java)
+        val am = this.am
         if (am == null) {
             log.warn("audio_router_no_audio_manager")
             return false
@@ -47,12 +55,9 @@ class BtAudioRouter(private val applicationContext: Context) : InputController.A
         // P3-5: BLUETOOTH_CONNECT runtime perm 不足 / その他 SecurityException も
         // setCommunicationDevice / productName 経路で起こりうるため、BT 周り全体を
         // runCatching で囲う。
-        val bt = runCatching {
-            am.availableCommunicationDevices.firstOrNull {
-                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-                    it.type == AudioDeviceInfo.TYPE_BLE_HEADSET
-            }
-        }.onFailure { log.warn("audio_router_enumerate_failed", it) }.getOrNull()
+        val bt = runCatching { am.firstBtCommDevice() }
+            .onFailure { log.warn("audio_router_enumerate_failed", it) }
+            .getOrNull()
 
         if (bt == null) {
             log.info("audio_router_no_bt_device_fallback_phone_mic")
@@ -62,11 +67,10 @@ class BtAudioRouter(private val applicationContext: Context) : InputController.A
         val ok = runCatching { am.setCommunicationDevice(bt) }
             .onFailure { log.warn("audio_router_set_failed", it) }
             .getOrDefault(false)
-        val product = runCatching { bt.productName?.toString() }.getOrNull().orEmpty()
         log.info(
             "audio_router_route",
             "device_type" to bt.type,
-            "product" to product,
+            "product" to bt.productName,
             "ok" to ok,
         )
         routed = ok
@@ -75,7 +79,7 @@ class BtAudioRouter(private val applicationContext: Context) : InputController.A
     }
 
     override fun restore() {
-        val am = applicationContext.getSystemService(AudioManager::class.java) ?: return
+        val am = this.am ?: return
         if (routed) {
             runCatching { am.clearCommunicationDevice() }
             routed = false

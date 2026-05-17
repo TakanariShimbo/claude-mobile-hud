@@ -2,6 +2,7 @@ package com.example.claudemobilehud.phone.glass
 
 import com.example.claudemobilehud.phone.data.ChannelEvent
 import com.example.claudemobilehud.phone.data.ChannelRepository
+import com.example.claudemobilehud.phone.data.model.PhoneUiState
 import com.example.claudemobilehud.phone.log.StructuredLog
 import com.example.claudemobilehud.phone.service.GlassConnectionService
 import com.example.claudemobilehud.protocol.ChatMessagePayload
@@ -100,9 +101,7 @@ class GlassRelay(
         // なり得る。Glass UI 側は indexOfFirst で `-1` ガード済みなのでクラッシュは
         // しないが、§3.4.1 の補注も参照。
         repository.uiState
-            .map { state ->
-                state.sessions.filter { it.isActive }.map { it.toWirePayload() }
-            }
+            .map { state -> state.sessionListForWire() }
             .distinctUntilChanged()
             .collect { list ->
                 sendWire(sender, SessionList(sessions = list, ts = System.currentTimeMillis()))
@@ -120,7 +119,7 @@ class GlassRelay(
 
     private suspend fun observeMessages(sender: (ByteArray) -> Unit) {
         repository.uiState
-            .map { state -> state.currentSessionId to state.messages.map { it.toWirePayload() } }
+            .map { state -> state.messagesForWire() }
             .distinctUntilChanged()
             .collect { (sessionId, messages) ->
                 sendWire(
@@ -192,20 +191,39 @@ class GlassRelay(
             }
     }
 
-    // --- payload mapper (protocol.MessageRole は phone.data.model から直接再 export 済) ---
-
-    private fun com.example.claudemobilehud.phone.data.model.SessionSummary.toWirePayload(): SessionSummaryPayload =
-        SessionSummaryPayload(
-            id = id,
-            label = label,
-            messageCount = messageCount,
-        )
-
-    private fun com.example.claudemobilehud.phone.data.model.ChatMessage.toWirePayload(): ChatMessagePayload =
-        ChatMessagePayload(
-            id = id,
-            role = role,
-            text = text,
-            chatId = chatId,
-        )
 }
+
+// --- payload mapper (protocol.MessageRole は phone.data.model から直接再 export 済) ---
+// internal にして `phone/src/test` から見えるようにする。GlassRelayMappingTest が
+// PhoneUiState の transformation を assert する (#179)。
+
+internal fun com.example.claudemobilehud.phone.data.model.SessionSummary.toWirePayload(): SessionSummaryPayload =
+    SessionSummaryPayload(
+        id = id,
+        label = label,
+        messageCount = messageCount,
+    )
+
+internal fun com.example.claudemobilehud.phone.data.model.ChatMessage.toWirePayload(): ChatMessagePayload =
+    ChatMessagePayload(
+        id = id,
+        role = role,
+        text = text,
+        chatId = chatId,
+    )
+
+/**
+ * `PhoneUiState` から Glass `SessionList.sessions` payload を導出。
+ * FR-GL-20: active のみ。`observeSessionList` が `.map { it.sessionListForWire() }`
+ * で使う。test (`GlassRelayMappingTest`) が直接呼ぶ。
+ */
+internal fun PhoneUiState.sessionListForWire(): List<SessionSummaryPayload> =
+    sessions.filter { it.isActive }.map { it.toWirePayload() }
+
+/**
+ * `PhoneUiState` から Glass `MessagesEvent` payload を導出。
+ * 戻り値は (sessionId, messages) のペア。Glass UI は current session の
+ * messages のみ描画するため currentSessionId と一緒に渡す。
+ */
+internal fun PhoneUiState.messagesForWire(): Pair<String?, List<ChatMessagePayload>> =
+    currentSessionId to messages.map { it.toWirePayload() }
