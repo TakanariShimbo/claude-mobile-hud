@@ -85,6 +85,16 @@ object GlassBridge {
     private val _messages = MutableStateFlow<List<ChatMessagePayload>>(emptyList())
     val messages: StateFlow<List<ChatMessagePayload>> = _messages.asStateFlow()
 
+    /**
+     * MessagesEvent の sessionId を message list と pair で公開する。
+     * SoundEffects の SEND 検出で session 切替時の false positive を排除するために必要
+     * (message id は HistoryStore autoinc で session 横断、id 比較だけでは別 session の
+     *  高い id を「自分の send」と誤認する)。既存 `messages` flow との二重 emit を避けるため
+     * 同一の MutableStateFlow を `handleWireEvent` で同時更新する。
+     */
+    private val _messagesForSession = MutableStateFlow<Pair<String?, List<ChatMessagePayload>>>(null to emptyList())
+    val messagesForSession: StateFlow<Pair<String?, List<ChatMessagePayload>>> = _messagesForSession.asStateFlow()
+
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
@@ -192,7 +202,10 @@ object GlassBridge {
             is InputTextOnly -> handleInputTextOnly(event)
             is SessionList -> _sessions.value = event.sessions
             is CurrentSessionEvent -> _currentSessionId.value = event.id
-            is MessagesEvent -> _messages.value = event.messages
+            is MessagesEvent -> {
+                _messages.value = event.messages
+                _messagesForSession.value = event.sessionId to event.messages
+            }
             is NotificationEvent -> emitNotification(event)
             is ErrorEvent -> _lastError.value = event.message
             // Glass → Phone 系。Glass 側受信経路では現れないが exhaustive にする。

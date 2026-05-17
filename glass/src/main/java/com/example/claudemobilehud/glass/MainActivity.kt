@@ -16,6 +16,8 @@ import com.example.claudemobilehud.glass.gesture.GestureBus
 import com.example.claudemobilehud.glass.gesture.GlassGesture
 import com.example.claudemobilehud.glass.glass.GlassBridge
 import com.example.claudemobilehud.glass.log.StructuredLog
+import com.example.claudemobilehud.protocol.MessageRole
+import com.example.claudemobilehud.protocol.TranscriptState
 import com.example.claudemobilehud.glass.ui.PhoneConnectionGate
 import com.example.claudemobilehud.glass.ui.SessionNavigator
 import com.example.claudemobilehud.glass.ui.nav.GlassNavHost
@@ -56,8 +58,8 @@ class MainActivity : ComponentActivity() {
                 log.info("notification_received", "kind" to notif.kind.name.lowercase())
                 ScreenAwakeManager.wakeOnNotification(this@MainActivity)
                 // P3-D of 5b review: 音の出し分け (reply=1 chime / permission=2 連 chime;
-                // FR-GL-71) は `NotificationSound.play` 内に閉じている。ここは kind 不問。
-                NotificationSound.play(this@MainActivity, notif.kind)
+                // FR-GL-71) は `SoundEffects.play` 内に閉じている。ここは kind 不問。
+                SoundEffects.play(this@MainActivity, notif.kind)
                 // reply: phone 側で IDLE のときだけ current session が当該 session に
                 //        switch されており、nav 先は自動的に正しい session の会話画面になる。
                 // permission: FR-GL-63 で当該 session が既に current のはずなので、nav は
@@ -65,6 +67,52 @@ class MainActivity : ComponentActivity() {
                 // どちらの kind でも nav 試行 → CONVERSATION の場合は LaunchedEffect 内
                 // ガードで no-op になる。
                 SessionNavigator.requestConversation()
+            }
+        }
+
+        // UI フィードバック音: 録音開始/停止 を TranscriptState 遷移で検出。
+        // 初回 emission (prev == null) では鳴らさない (起動直後の collect で誤発火を防止)。
+        lifecycleScope.launch {
+            var prev: TranscriptState? = null
+            GlassBridge.phoneState.collect { state ->
+                val curr = state.transcriptState
+                if (prev != null && prev != curr) {
+                    when {
+                        curr == TranscriptState.LISTENING ->
+                            SoundEffects.play(this@MainActivity, SoundEffects.Kind.RECORD_START)
+                        prev == TranscriptState.LISTENING ->
+                            SoundEffects.play(this@MainActivity, SoundEffects.Kind.RECORD_STOP)
+                    }
+                }
+                prev = curr
+            }
+        }
+
+        // UI フィードバック音: 送信 を OUTGOING message の最大 id 増加で検出。
+        // sessionId と messages を同 wire event (MessagesEvent) 由来の atomic pair で
+        // 観測することで、session 切替時の false positive を防ぐ (HistoryStore id は
+        // session 横断 autoinc なので、別 session の高 id を「新規送信」と誤認する可能性
+        // があり、session-tagged flow なしでは安全に判定できない)。
+        // session 変更を検出した emission は baseline 記録のみで音を鳴らさない。
+        lifecycleScope.launch {
+            var lastSession: String? = null
+            var lastOutId: Long? = null
+            var initialized = false
+            GlassBridge.messagesForSession.collect { (sessId, msgs) ->
+                val maxOutId = msgs.asSequence()
+                    .filter { it.role == MessageRole.OUTGOING }
+                    .maxOfOrNull { it.id }
+                if (!initialized || sessId != lastSession) {
+                    lastSession = sessId
+                    lastOutId = maxOutId
+                    initialized = true
+                    return@collect
+                }
+                val prev = lastOutId
+                if (prev != null && maxOutId != null && maxOutId > prev) {
+                    SoundEffects.play(this@MainActivity, SoundEffects.Kind.SEND)
+                }
+                lastOutId = maxOutId
             }
         }
 
