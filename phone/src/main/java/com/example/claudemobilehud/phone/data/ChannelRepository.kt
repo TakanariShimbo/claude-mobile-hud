@@ -178,6 +178,7 @@ class ChannelRepository(
                     transcriptText = transcriptText,
                     inputText = inputText,
                     micSource = micSource,
+                    confirming = confirmingForCurrent,
                 )
             }
                 .distinctUntilChanged()
@@ -186,7 +187,9 @@ class ChannelRepository(
                     val newSeq = seqCounter.incrementAndGet()
                     val payload = draft.toPayload(seq = newSeq)
                     _currentState.value = payload
-                    StructuredLog.phoneStateEmit(payload)
+                    // AC-09 検証ログ。`confirming` は CurrentState 自体には乗っていない
+                    // (mode に折り込まれる) ので draft 側から渡す。
+                    StructuredLog.phoneStateEmit(payload, draft.confirming)
                 }
         }
 
@@ -588,6 +591,7 @@ class ChannelRepository(
         transcriptText = "",
         inputText = "",
         micSource = MicSource.GLASS,
+        confirming = false,
     )
 
     private fun initialCurrentState(): CurrentState = CurrentState(
@@ -608,6 +612,12 @@ class ChannelRepository(
         val transcriptText: String,
         val inputText: String,
         val micSource: MicSource,
+        /**
+         * `_confirmingBySession[currentSessionId] == true` の派生。`mode` には折り込み
+         * 済みだが、AC-09 verifier が CONFIRMING mode の正当性を確認するために key と
+         * しても出すので draft に明示保持する (`StructuredLog.phoneStateEmit` 第 2 引数)。
+         */
+        val confirming: Boolean,
     ) {
         fun toPayload(seq: Int): CurrentState = CurrentState(
             seq = seq,

@@ -516,7 +516,9 @@ init {
         .collect { draft ->
             val newSeq = seqCounter.incrementAndGet()
             _currentState.value = draft.toPayload(seq = newSeq)
-            StructuredLog.phoneStateEmit(_currentState.value)  // AC-09 検証用
+            // AC-09 検証用 (§7.2)。`confirming` は CurrentState に乗せない
+            // (mode に折り込み済み) ので draft 側から渡す。
+            StructuredLog.phoneStateEmit(_currentState.value, draft.confirming)
         }
     }
 }
