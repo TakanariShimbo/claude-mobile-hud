@@ -45,7 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * data 層 facade (docs/03 §3.2.1)。
  *
  * 単一 source `_draft` から `currentState` (Glass wire) と `uiState` (Phone UI) を
- * 派生させ、mode の観測ずれを排除する (NFR-13 / docs/03 §4.5.1)。
+ * 派生させ、mode の観測ずれを排除する (NFR-13 / docs/02 §4.5)。
  */
 class ChannelRepository(
     private val applicationContext: Context,

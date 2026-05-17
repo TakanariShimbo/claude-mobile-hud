@@ -17,19 +17,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Phase 3 §3.3.1 の FGS state machine。
+ * Glass+Mic FGS の state machine (docs/03 §3.3.1)。両 onCreate/onDestroy が
+ * 揃ったときだけ state を進めることで、FGS 間の直接結合と過渡状態を排除する。
  *
- * Glass + Mic の 2 FGS を 1 つの論理サブシステムとして扱い、両者の
- * onCreate / onDestroy が揃ったときだけ state を進める。"片方しか起動して
- * いない過渡状態" を許さないことで FGS 間結合と暗黙状態を排除する (§3.3.1 表参照)。
- *
- * - **`object`** は test しづらいため、Phase 4 では `class` + `AppContainer` に
- *   singleton を置く構成にした (設計書の object は意図伝達用 sketch)。
- * - **`fgsOps`** は FGS 起動 / 停止の delegate を抽象化。Android Context への
- *   依存を一カ所に閉じ込め JVM unit test で fake に差し替え可能 (P3-9 と同思想)。
- * - **`Starting` timeout (5s)**: §3.3.1 異常系。両 ON_CREATE が来ないまま
- *   経過したら Stopping(false) に強制遷移。誤起動した片側 FGS の clean-up は
- *   stopGlassFgs / stopMicFgs を呼ぶ。
+ * 状態遷移表 / 異常系 / 実装上の不変条件はすべて §3.3.1 に集約。
  */
 class AppLifecycleController internal constructor(
     private val fgsOps: FgsOperations,
@@ -45,12 +36,9 @@ class AppLifecycleController internal constructor(
     private val _glassState = MutableStateFlow<GlassFgsState>(GlassFgsState.Off)
     val glassState: StateFlow<GlassFgsState> = _glassState.asStateFlow()
 
-    // FGS の実 alive 状態を track。両方 true で Starting → Running、両方 false で
-    // Stopping(_) → 確定状態に進める。
     private var glassFgsRunning = false
     private var micFgsRunning = false
 
-    /** Starting 状態でだけ走らせる 5s タイムアウト監視 Job。 */
     private var startingWatchdog: Job? = null
 
     suspend fun startChannel(context: Context) = mutex.withLock {
@@ -69,12 +57,8 @@ class AppLifecycleController internal constructor(
 
     suspend fun startGlassSession(context: Context) = mutex.withLock {
         when (val s = _glassState.value) {
-            GlassFgsState.Off -> {
-                transitionToStarting(context)
-            }
-            GlassFgsState.Starting, GlassFgsState.Running -> {
-                // 冪等。
-            }
+            GlassFgsState.Off -> transitionToStarting(context)
+            GlassFgsState.Starting, GlassFgsState.Running -> Unit
             is GlassFgsState.Stopping -> {
                 if (!s.restartAfter) {
                     _glassState.value = GlassFgsState.Stopping(restartAfter = true)
@@ -95,7 +79,6 @@ class AppLifecycleController internal constructor(
                 log.info("glass_stopping", "from" to s::class.simpleName.orEmpty())
             }
             is GlassFgsState.Stopping -> {
-                // restart 予約を取消し。停止続行。
                 if (s.restartAfter) {
                     _glassState.value = GlassFgsState.Stopping(restartAfter = false)
                     log.info("glass_restart_cancelled")
@@ -104,21 +87,13 @@ class AppLifecycleController internal constructor(
         }
     }
 
-    /**
-     * shutdown 時に Glass + Channel を順に止める。FGS の ON_DESTROY callback を
-     * 待たずに return するので、呼び出し側 (PhoneApplication.onTerminate 等) で
-     * 必要なら `glassState`/`channelRunning` を await すること (Phase 4 では
-     * Application.onTerminate がエミュレータでしか呼ばれない事情から best-effort)。
-     */
+    /** FGS の ON_DESTROY callback を待たずに return する best-effort shutdown。 */
     suspend fun shutdownAll(context: Context) {
         stopGlassSession(context)
         stopChannel(context)
     }
 
-    /**
-     * GlassConnectionService が自然切断 (CXR-L disconnect) を検出したときに呼ぶ。
-     * `Starting` / `Running` → `Stopping(false)` (両 FGS を畳む)。
-     */
+    /** GlassConnectionService が CXR-L 自然切断を検出したときに呼ぶ。 */
     fun onGlassDisconnected(context: Context) {
         scope.launch {
             mutex.withLock {
@@ -136,26 +111,16 @@ class AppLifecycleController internal constructor(
         }
     }
 
-    /**
-     * Glass/Mic FGS の onCreate / onDestroy から呼ばれる。両方の ON_CREATE が
-     * 揃ったら Starting → Running、両方 ON_DESTROY が揃ったら Stopping → 確定。
-     * これ自体は suspend ではなく fire-and-forget (Service のライフサイクル callback
-     * を block しない)。
-     */
+    /** Glass/Mic FGS の onCreate / onDestroy から fire-and-forget で呼ばれる。 */
     fun onFgsLifecycle(kind: FgsKind, event: FgsLifecycle, context: Context) {
         scope.launch {
-            // P2-4: shutdown 中も lifecycle 通知だけは確実に消化したい。Application scope
-            // が cancel 進行中でも mutex 取得とフラグ更新までは NonCancellable で守る。
+            // docs/03 §3.3.1 実装上の不変条件: shutdown 中も lifecycle 通知は NonCancellable で完走させる。
             withContext(NonCancellable) {
                 mutex.withLock {
                     when (kind) {
                         FgsKind.GLASS_CONNECTION -> glassFgsRunning = (event == FgsLifecycle.ON_CREATE)
                         FgsKind.MIC -> micFgsRunning = (event == FgsLifecycle.ON_CREATE)
-                        FgsKind.CHANNEL -> {
-                            // CHANNEL は Glass 系 state machine とは独立。channelRunning
-                            // は startChannel / stopChannel 側で更新済みなのでここでは触らない。
-                            return@withLock
-                        }
+                        FgsKind.CHANNEL -> return@withLock
                     }
                     evaluateGlassTransition(context)
                 }
@@ -175,9 +140,7 @@ class AppLifecycleController internal constructor(
                         log.info("glass_running")
                     }
                     none -> {
-                        // P2-1: Starting 中に片方が ON_CREATE → ON_DESTROY と落ちて両 false に
-                        // なった (= 片方 FGS が起動直後にクラッシュ等)。5s watchdog を待たず
-                        // すぐ Stopping(false) に畳む。残った FGS が居ても stop は idempotent。
+                        // docs/03 §3.3.1 異常系: partial failure 早期 abort。
                         cancelStartingWatchdog()
                         fgsOps.stopGlassFgs(context)
                         fgsOps.stopMicFgs(context)
@@ -189,7 +152,6 @@ class AppLifecycleController internal constructor(
             is GlassFgsState.Stopping -> {
                 if (none) {
                     if (s.restartAfter) {
-                        // restart 予約あり: 再度 Starting に持って行く (両 FGS を再起動)。
                         transitionToStarting(context)
                     } else {
                         _glassState.value = GlassFgsState.Off
@@ -216,7 +178,6 @@ class AppLifecycleController internal constructor(
                         "glass_fgs" to glassFgsRunning,
                         "mic_fgs" to micFgsRunning,
                     )
-                    // 異常終了: 両 FGS を畳む。片方しか上がっていなくても stop は idempotent。
                     fgsOps.stopGlassFgs(context)
                     fgsOps.stopMicFgs(context)
                     _glassState.value = GlassFgsState.Stopping(restartAfter = false)
@@ -240,10 +201,7 @@ class AppLifecycleController internal constructor(
     enum class FgsKind { CHANNEL, GLASS_CONNECTION, MIC }
     enum class FgsLifecycle { ON_CREATE, ON_DESTROY }
 
-    /**
-     * FGS 起動 / 停止の delegate。本番は `RealFgsOperations` で
-     * `context.startForegroundService(...)` を叩く。テストは fake。
-     */
+    /** FGS 起動 / 停止の delegate。本番は `RealFgsOperations`、テストは fake。 */
     interface FgsOperations {
         fun startChannelFgs(context: Context)
         fun stopChannelFgs(context: Context)

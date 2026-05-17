@@ -7,7 +7,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.example.claudemobilehud.glass.log.StructuredLog
 
 /**
- * グラスの display 電源管理の単一窓口 (Phase 3 §4.5)。
+ * グラスの display 電源管理の単一窓口。
  *
  * 背景: Rokid YodaOS では `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` が CXR-L
  * 経由の reply 受信などをきっかけに事実上無効化されることを確認している。
