@@ -1,5 +1,4 @@
-// Hub daemon entry. Phase 3 §5。
-// PC 上で長時間動き、Phone とは HTTP/SSE、Bridge とは TCP NDJSON で繋がる。
+// docs/03 §5.6: Hub daemon entry。HTTP/SSE + Bridge NDJSON を 1 プロセスで wire する。
 
 import { loadConfig } from "./config/Config.js";
 import { StructuredLog, type LogLevel } from "./log/StructuredLog.js";
@@ -22,6 +21,7 @@ async function main(): Promise<void> {
     const chats = new ChatRegistry();
     const outstanding = new OutstandingPermissions();
 
+    // docs/03 §5.6.1: http と bridge の循環参照はクロージャで結ぶ。
     const http = new HttpServer({
         sessions,
         chats,
@@ -38,14 +38,12 @@ async function main(): Promise<void> {
         logger: root.withTag("bridge"),
     });
 
-    // 片方の listen が失敗した時はもう片方を必ず close してから rethrow。
-    // (port 衝突などで supervisord 再起動を待つ間に socket を残さない。)
+    // docs/03 §5.6.2: 片肺 listen 失敗時に socket を残さないため allSettled + cleanup。
     const bridgeListen = bridge.listen(config.bridgePort, "127.0.0.1");
     const httpListen = http.listen(config.httpPort, "0.0.0.0");
     const results = await Promise.allSettled([bridgeListen, httpListen]);
     const failures = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
     if (failures.length > 0) {
-        // どちらかが listening になっていたら close。Promise.allSettled は fulfilled も識別する。
         const cleanups: Promise<unknown>[] = [];
         if (results[0]!.status === "fulfilled") cleanups.push(bridge.close());
         if (results[1]!.status === "fulfilled") cleanups.push(http.close());
@@ -53,6 +51,7 @@ async function main(): Promise<void> {
         throw failures[0]!.reason;
     }
 
+    // docs/03 §5.6.3: SIGTERM/SIGINT 2 入口、idempotency は server.close() 任せ。
     const shutdown = async (signal: string): Promise<void> => {
         root.info("shutdown", { signal });
         await Promise.allSettled([bridge.close(), http.close()]);
@@ -62,6 +61,7 @@ async function main(): Promise<void> {
     process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
+// docs/03 §5.6.4: Logger 不在の bootstrap 失敗用 fatal path (stderr 直書き)。
 main().catch((err) => {
     process.stderr.write(`[hub] fatal: ${(err as Error).stack ?? String(err)}\n`);
     process.exit(1);

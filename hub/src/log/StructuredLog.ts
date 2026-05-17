@@ -1,5 +1,4 @@
-// 構造化ログ。Phase 3 §8.3 の key=value 形式。
-// stderr に書く (stdout は将来の IPC 拡張のため空けておく)。
+// docs/03 §8.3 / §8.5: 構造化ログ key=value 形式。stderr 専有 (§8.5.1)。
 
 export type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
 
@@ -16,6 +15,7 @@ export class StructuredLog implements Logger {
     constructor(
         private readonly tag: string,
         private readonly minLevel: LogLevel = "INFO",
+        // docs/03 §8.5.2: sink seam (テスト用 capture)。
         private readonly sink: (line: string) => void = (line) => process.stderr.write(line + "\n"),
     ) {}
 
@@ -44,21 +44,16 @@ export class StructuredLog implements Logger {
         this.emit("ERROR", event, fields);
     }
 
+    /** docs/03 §8.5.3: dot 区切り階層タグの cascade。 */
     withTag(suffix: string): StructuredLog {
         return new StructuredLog(`${this.tag}.${suffix}`, this.minLevel, this.sink);
     }
 }
 
-// 空白 / quote / `=` / `\` / 制御文字 (0x00-0x1F, 0x7F) のいずれかを含むなら quote する。
+// docs/03 §8.5.4: 空白 / `"` / `=` / `\` / 制御文字を含むときだけ quote。
 const NEEDS_QUOTE = /[\s"=\\\x00-\x1f\x7f]/;
 
-/**
- * key=value のための値整形。
- * - null / undefined はそれぞれ "null" / "undefined" (空文字と区別する。Phase 3 §8.3 の例参照)。
- * - 数値・boolean はそのまま。
- * - string は空白・`=`・`\`・改行・制御文字・引用符を含む場合 `JSON.stringify` で完全 escape。
- *   1 行 1 イベント (Phase 3 §8.3) を壊さない。
- */
+// docs/03 §8.5.5: null / undefined は文字列として区別 (空文字に潰さない)。
 function formatValue(v: unknown): string {
     if (v === null) return "null";
     if (v === undefined) return "undefined";
