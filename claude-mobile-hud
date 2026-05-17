@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CMD="${1:-help}"
 shift || true
 

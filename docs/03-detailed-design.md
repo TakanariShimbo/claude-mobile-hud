@@ -4952,6 +4952,25 @@ preview` (preview は jsonl 1 行目から `message.content[0].text || content |
   代わりに `pgrep -f hub/src/index.ts` で Hub 動作中なら user に restart を促すメッセージ
 - Phone Settings の token も再 pair が必要、と stderr で明示する
 
+#### 9.3.8 `~/.local/bin` symlink 経由呼び出し時の `$ROOT` 解決
+
+README §2 推奨フロー (`ln -s .../claude-mobile-hud ~/.local/bin/claude-mobile-hud`)
+で symlink 経由に invoke されると、`$0` は symlink 側のパスになる。素朴に
+`ROOT="$(cd "$(dirname "$0")" && pwd)"` と書くと `ROOT=~/.local/bin` に解決され、
+`$ROOT/hub/node_modules` / `$ROOT/bridge/...` が全て不在になって "hub/node_modules
+not found" 等の actionable error が **誤って** 発火する (= user は `npm ci` 済みなのに
+インストールせよと言われる misleading 状態)。
+
+`readlink -f "$0"` で symlink を実体に解決してから `dirname` を取り、repo 直下を
+`$ROOT` に固定する:
+
+```bash
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+```
+
+`readlink -f` は GNU coreutils なので Ubuntu 想定環境 (§04-setup) で常に利用可能。
+BSD/macOS では `-f` 挙動が異なるが本プロジェクトは Linux ホスト前提なのでスコープ外。
+
 ### 9.4 Phone `AndroidManifest.xml` 詳細
 
 #### 9.4.1 FGS (Foreground Service) と targetApi 34
