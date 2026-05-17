@@ -14,17 +14,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Phase 3 §3.8。通知シェードの「許可 / 拒否」ボタンが叩く Receiver。
- *
- * 経路 2 系統:
- *   - **アプリプロセス生存時** (`PhoneApplication.isInitialized`): 直接
- *     `repository.respondPermission` を呼ぶ。通知 cancel もここで。
- *   - **kill 状態**: `VerdictDispatchService` (FGS-dataSync) に委譲。
- *     extras に baseUrl/token を冗長化しているのは DataStore 読み出しを
- *     避け NFR-14 5s 予算に収めるため (§3.3.5.2)。
- *
- * Receiver は短命なので goAsync は使わず `applicationScope` (Application
- * 由来) に suspend 関数を launch する。
+ * 通知シェードの「許可 / 拒否」ボタン Receiver (docs/03 §3.8)。in-proc / kill 経路の判定は
+ * §3.8.1、Hub credentials missing 時の repost は §3.8.2 を参照。
  */
 class PermissionActionReceiver : BroadcastReceiver() {
     private val log = StructuredLog("channel.verdict")
@@ -39,7 +30,6 @@ class PermissionActionReceiver : BroadcastReceiver() {
 
         val app = context.applicationContext as? PhoneApplication
         if (app != null && app.containerOrNull != null) {
-            // 生存経路: Repository を直接叩く。
             val repo = app.container.repository
             val scope = app.applicationScope ?: CoroutineScope(SupervisorJob() + Dispatchers.IO)
             scope.launch { repo.respondPermission(requestId, decision) }
@@ -48,19 +38,14 @@ class PermissionActionReceiver : BroadcastReceiver() {
             }
             log.info("verdict_inproc", "request_id" to requestId, "decision" to decision.name)
         } else {
-            // kill 経路: FGS-dataSync 委譲。
+            // docs/03 §3.8.2: Hub credentials missing 時の repost。
             if (baseUrl.isBlank() || token.isBlank()) {
-                // P2-2: 通知タップは setAutoCancel で消えるが、verdict が Hub に届かないと
-                // Glass / Phone UI は気付けない。delegate 不能を repost で見える化する。
-                // タップ前の通知が dismiss されていなければそのまま見えるが、AutoCancel で
-                // 消えた場合のために改めて post する (channel id は VERDICT_DISPATCH を流用)。
                 log.error(
                     "verdict_dispatch_skipped_missing_hub",
                     "request_id" to requestId,
                     "base_url_present" to baseUrl.isNotBlank(),
                     "token_present" to token.isNotBlank(),
                 )
-                // 通知 id を確保できているならユーザに見える形でリポスト。
                 if (notificationId >= 0) {
                     val notif = NotificationFactory.verdictDispatch(
                         context,
@@ -90,10 +75,7 @@ class PermissionActionReceiver : BroadcastReceiver() {
         private const val EXTRA_BASE_URL = "base_url"
         private const val EXTRA_TOKEN = "token"
 
-        /**
-         * NotificationFactory.permission から渡す PendingIntent の建設子。
-         * baseUrl/token を extras に乗せて kill 経路でも自己完結させる (§3.3.5.2)。
-         */
+        /** NotificationFactory.permission から渡す PendingIntent の builder (§3.3.5.2)。 */
         fun intent(
             context: Context,
             requestId: String,

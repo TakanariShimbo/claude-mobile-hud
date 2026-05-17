@@ -1860,7 +1860,9 @@ private val serializer = MapSerializer(
 
 ことで save の eventual consistency を担保する。
 
-#### 3.6.2 設定 DataStore
+#### 3.6.2 設定 DataStore (+ 暗号化 token storage)
+
+Phone-local の設定永続化は **2 系統**: DataStore (非機密の Settings) と `EncryptedSharedPreferences` (CXR-L token、§3.6.2.1)。
 
 ```
 Preferences keys:
@@ -1869,6 +1871,27 @@ Preferences keys:
 - "openai_api_key" (String)
 - "last_current_session_id" (String, FR-PH-54)
 ```
+
+##### 3.6.2.1 `TokenStore` (CXR-L token secure storage)
+
+Settings DataStore (`base_url` / `token` / `openai_api_key`) とは **別の secure storage** として CXR-L pairing token を `EncryptedSharedPreferences` で持つ:
+
+```
+prefs file: claude_mhud_secure_prefs
+key:        cxr_token
+backend:    EncryptedSharedPreferences (AES256-GCM value / AES256-SIV key)
+```
+
+Settings DataStore と分ける理由:
+- **役割が違う**: `TokenStore` の token は **Rokid CXR-L SDK の credential** (Glass 接続用)。Hub の `X-Token` (HTTP) とは別物
+- **at-rest 暗号化を強める**: NFR-20 と同等扱い。Hub token は HTTP の `X-Token` だけで OS の保護に頼るが、CXR-L token は端末ローカルで `EncryptedSharedPreferences` を経由する
+
+##### 3.6.2.2 `TokenStore` 実装上の不変条件
+
+- **`prefs()` の lazy cache (P3-1)**: `EncryptedSharedPreferences.create` は MasterKey 派生 (KMS) を毎回叩くため **ms オーダーで重い**。`@Volatile cached: SharedPreferences?` + `synchronized` で application scope に単一インスタンスを保持
+- **`load(context)` の例外吸収**: MasterKey 異常 / 暗号鍵ローテ後のリストア等で `getString` が例外を投げるケースがあるため、`try { ... } catch (e: Throwable) { warn log; null fallback }` で起動を止めない
+- **`save` / `clear` の StateFlow 同期更新**: `prefs().edit { ... }` の直後に `_token.value = newValue` (or `null`)。observer (`GlassConnectionService.onStartCommand` 等) が最新値を即読む契約
+- **`load(context)` は `Application.onCreate` で 1 回だけ同期実行**: 以降の read は flow 経由で済むので lazy init は取らない (起動順は §3.3.6.1 ステップ 1)
 
 #### 3.6.3 通知 channel id
 
@@ -1970,6 +1993,8 @@ fun mapToPresentation(error: Any): UiPresentation = when (error) {
 
 ### 3.8 通知シェード経由 verdict 経路の Receiver
 
+> 下記コードは模式図。実装は `containerOrNull != null` / `ContextCompat.startForegroundService` を使い、Hub credentials missing / 通知 repost を含む。詳細は §3.8.1 / §3.8.2 を参照。
+
 ```kotlin
 class PermissionActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -1997,6 +2022,34 @@ class PermissionActionReceiver : BroadcastReceiver() {
     }
 }
 ```
+
+#### 3.8.1 in-proc / kill 経路の判定
+
+`PhoneApplication.containerOrNull` を読んで分岐 (§3.3.6.2):
+
+- **in-proc** (`containerOrNull != null`): Repository を `applicationScope.launch` で叩き、通知を直接 cancel。`scope` が null の極端ケースは fresh な `CoroutineScope(SupervisorJob() + Dispatchers.IO)` を fallback として作るが、これは Receiver の lifetime に縛られないので fire-and-forget
+- **out-of-proc / kill** (`containerOrNull == null`): `VerdictDispatchService` を `ContextCompat.startForegroundService` で起動 (§3.3.5)
+
+Receiver は短命なので `goAsync` は使わず、in-proc 経路は `PhoneApplication.applicationScope` (= application 生存と同じ scope) に suspend 関数を launch する。
+
+#### 3.8.2 Hub credentials missing 経路の repost (P2-2)
+
+kill 経路で `baseUrl` / `token` extras のどちらかが blank だと verdict が Hub に届かないが、通知は `setAutoCancel(true)` でタップ時点で既に消えており **ユーザは「verdict 送信できなかった」事実に気付けない**。
+
+対処として `notificationId` を再利用して **「再ペアが必要 (Hub の token が見つかりません)」通知を repost** する (`CHANNEL_VERDICT_DISPATCH` を流用):
+
+```kotlin
+if (baseUrl.isBlank() || token.isBlank()) {
+    log.error("verdict_dispatch_skipped_missing_hub", ...)
+    if (notificationId >= 0) {
+        val notif = NotificationFactory.verdictDispatch(context, "再ペアが必要です ...")
+        notifMgr.notify(notificationId, notif)
+    }
+    return
+}
+```
+
+これによりタップ済通知の `AutoCancel` で消えたケースでも repost が見える形で残り、ユーザに「Settings からの再ペアが必要」を促せる。
 
 ---
 

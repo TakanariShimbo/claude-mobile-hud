@@ -10,30 +10,17 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * CXR-L pairing token を EncryptedSharedPreferences で保持する secure storage。
- *
- * 設計書 §3.4 / §3.6 系の前提:
- *   - UI から書き換え可能 (QR ペア時に save)。
- *   - 4c の GlassConnectionService が起動時に最新値を読み CXR-L `connect` に使う。
- *
- * Settings DataStore (baseUrl / token / openAiApiKey) と分けているのは:
- *   - CXR-L token は Rokid SDK にとっての credential であり Hub の HTTP token とは別物。
- *   - EncryptedSharedPreferences で at-rest 暗号化したい (NFR-20 と同等扱い)。
- *
- * lazy init を取らないのは、`load(context)` を Application.onCreate で 1 回だけ
- * 同期実行して memory cache に載せれば、以降の read は flow 経由で済むため。
+ * CXR-L pairing token の secure storage (docs/03 §3.6.2.1)。Settings DataStore と分ける理由、
+ * `prefs()` の lazy cache (P3-1)、`load` の例外吸収、StateFlow 同期更新は §3.6.2.2 を参照。
  */
 object TokenStore {
     private const val PREFS_NAME = "claude_mhud_secure_prefs"
     private const val KEY_CXR_TOKEN = "cxr_token"
-    // P3-5: 旧 "channel.glass" は glass relay 層と被るため secure storage 用に分離。
     private val log = StructuredLog("channel.token")
 
     private val _token = MutableStateFlow<String?>(null)
     val token: StateFlow<String?> = _token.asStateFlow()
 
-    // P3-1: EncryptedSharedPreferences の build は MasterKey 派生 (KMS) を毎回叩くため
-    // ms オーダーで重い。Application scope の単一インスタンスをキャッシュする。
     @Volatile
     private var cached: android.content.SharedPreferences? = null
 
@@ -59,7 +46,7 @@ object TokenStore {
         _token.value = try {
             prefs(context).getString(KEY_CXR_TOKEN, null)
         } catch (e: Throwable) {
-            // master key 異常 / 暗号鍵ローテ後のリストアなど: 起動を止めないため null fallback。
+            // docs/03 §3.6.2.2: master key 異常 / 鍵ローテ後のリストア等で起動を止めない。
             log.warn("token_load_failed", e)
             null
         }
