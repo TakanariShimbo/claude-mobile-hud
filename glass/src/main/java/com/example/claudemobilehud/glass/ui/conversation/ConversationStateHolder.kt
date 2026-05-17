@@ -23,24 +23,11 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
- * 会話画面の表示状態ホルダ。Phase 3 §4.4 (Rev 1 構造を維持しつつ `PhoneState` を 1 つの
- * 上流とする)。
+ * 会話画面の表示状態ホルダ (docs/03 §4.4)。Phone 側が mode の真実で、ここは [ConversationMode]
+ * を受けて表示する。Confirming/PermissionConfirming のカーソル位置だけ Glass-local に
+ * [sendChoice] / [permissionChoice] で持ち、決定したら wire で Phone に送る。
  *
- * **モード決定 (LISTENING / PERMISSION_CONFIRMING / CONFIRMING / IDLE) は phone 側が真実**
- * で、このクラスはその [ConversationMode] を wire で受信してそのまま表示する。glass 固有の
- * 関心事は「Confirming / PermissionConfirming 内でどちらの選択肢にカーソルがあるか」だけで、
- * これは round-trip させたくないので [sendChoice] / [permissionChoice] として glass-local に
- * 持つ (= ホバー / カーソル位置のみ glass で完結)。
- *
- * ジェスチャは現在モードに応じて分岐し、必要な「決定」だけを wire で phone に送る。
- *
- * 4-5b: mode / pending を別々の StateFlow にすると 1 描画フレーム内に乖離する hazard が
- * あるため、`CurrentState` 単発 event で原子的に合わさる `PhoneState` 1 つに集約 (AD-03)。
- *
- * Compose 非依存。Composable から remember で 1 インスタンス保持し:
- *   - [state] を collectAsStateWithLifecycle で観測
- *   - [scrollRequest] を LaunchedEffect で消費して LazyListState を動かす
- *   - GestureBus.events を [onGesture] にそのまま流す
+ * Compose 非依存 (`onGesture` を JVM テストから直接呼べる)。
  */
 class ConversationStateHolder(
     private val phoneState: StateFlow<PhoneState>,
@@ -48,16 +35,12 @@ class ConversationStateHolder(
     scope: CoroutineScope,
     private val bridge: Sender = DefaultSender,
 ) {
-    /** GlassBridge への送信 + UI 効果音を 1 個の seam にまとめる (テストで差し替え可)。 */
+    /** GlassBridge への送信 + UI 効果音を 1 つの seam にまとめる (テストで差し替え可)。 */
     interface Sender {
         fun sendGesture(which: GestureKind)
         fun sendListeningCancel()
         fun sendPermissionVerdict(requestId: String, decision: PermissionDecision)
-        /**
-         * Glass ローカルの UI 効果音再生 (録音開始 TAP の即時 feedback 等)。
-         * 状態遷移ベース検出だと Phone との往復 (~150-300ms) ぶん遅延するため、ボタン押下時点で
-         * 鳴らす必要があるものはここから呼ぶ。
-         */
+        // Glass-local の即時 feedback 用 (Phone との round-trip 待ちでは間に合わないもの)。
         fun playSfx(kind: com.example.claudemobilehud.glass.SoundEffects.Kind)
     }
 
@@ -88,18 +71,12 @@ class ConversationStateHolder(
     private val sendChoice = MutableStateFlow(SendChoice.SEND)
     private val permissionChoice = MutableStateFlow(PermissionChoice.ALLOW)
 
-    // P1-A of 5b review: NFR-13 atomicity を Glass UI でも維持するため、`phoneState` を
-    // 1 上流のまま combine に渡す。旧コードは `phoneState.map { it.mode }` と
-    // `phoneState.map { it.pendingPermission }` を別 upstream として `combine` していたが、
-    // `combine` は派生 flow ごとに独立 collect するため、PhoneState 1 emit に対して
-    // 中間 emit (mode=新 / pending=旧) が 1 frame だけ漏れ、`State.PermissionConfirming
-    // → fallback Idle` の経路が瞬間的に通る hazard があった。PhoneState を 1 flow にすれば
-    // distinctUntilChanged で常に原子値で配信される。
-    //
-    // P2-D of 5b review: initialValue は `phoneState.value` から derive する。
-    // SharingStarted.Eagerly でも collector が初値を作るまでに 1 frame の遅延があり、
-    // 旧来 `State.Idle` 固定だと再 mount 直後に Listening などの実態と乖離した値が
-    // 観測されていた。
+    // phoneState は 1 upstream のまま combine に渡す: `map { it.mode }` と
+    // `map { it.pendingPermission }` を別 upstream にすると、PhoneState 1 emit に対し
+    // (mode=新 / pending=旧) の中間 emit が 1 frame 漏れ、PermissionConfirming → Idle の
+    // fallback 経路を瞬間的に通る hazard が出る (NFR-13)。
+    // initialValue は snapshot から derive する (Eagerly でも collector 初値生成に 1 frame
+    // ぶん遅延があり、Idle 固定だと再 mount 直後の実態と乖離する)。
     val state: StateFlow<State> = combine(
         phoneState,
         sendChoice,
@@ -122,8 +99,7 @@ class ConversationStateHolder(
         }
 
     init {
-        // permission の identity (requestId) が変わるたび permissionChoice を ALLOW にリセット。
-        // null → non-null だけでなく A → B の直接遷移にも対応する。
+        // requestId が変わるたび ALLOW にリセット (A → B の直接遷移にも対応)。
         scope.launch {
             phoneState
                 .map { it.pendingPermission?.requestId }
@@ -131,9 +107,7 @@ class ConversationStateHolder(
                 .filter { it != null }
                 .collect { permissionChoice.value = PermissionChoice.ALLOW }
         }
-        // Listening → Confirming に遷移したら sendChoice を SEND にリセット。
-        // (PermissionConfirming → Confirming のような割り込み復帰では preserve したいので、
-        // 「Listening 直後の Confirming」だけに絞っている)
+        // Listening 直後の Confirming だけ SEND にリセット (Permission 復帰時は preserve したい)。
         scope.launch {
             var prev: ConversationMode? = null
             phoneState.map { it.mode }.distinctUntilChanged().collect { cur ->
@@ -162,11 +136,9 @@ class ConversationStateHolder(
     private fun handleIdle(g: GlassGesture) {
         when (g) {
             GlassGesture.Tap -> {
-                // 録音開始 sound は TAP 押下時点で鳴らす (UX 即時性)。
-                // Phone 側 mic capture は ~50-200ms 後に始まるが、その間は無音 lead-in
-                // なので sound 末尾が capture に乗ってもユーザ発話の冒頭はカットされない。
-                // 状態遷移ベース (TranscriptState → LISTENING) だと round-trip ぶん
-                // 遅れて聞こえるので、ここで先行発火する。
+                // 録音開始 sound は press 時点で先行発火 (状態遷移ベースだと round-trip ぶん
+                // 遅延)。Phone mic capture は 50-200ms 後に始まり、その間は無音 lead-in なので
+                // sound 末尾が capture に乗っても発話冒頭はカットされない。
                 bridge.playSfx(com.example.claudemobilehud.glass.SoundEffects.Kind.RECORD_START)
                 bridge.sendGesture(GestureKind.TAP)
             }
@@ -182,25 +154,17 @@ class ConversationStateHolder(
     private fun handleListening(g: GlassGesture) {
         when (g) {
             GlassGesture.Tap -> {
-                // phone 側で TAP を受けると「Listening → stop + confirming=true」となり、
-                // 続けて mode push (CONFIRMING) が wire で帰ってくる。glass は次の mode 更新で
-                // Confirming UI に切替わる (round-trip 1 回ぶんの遅延あり)。
-                //
-                // P2-C of 5b review: Listening 中の Tap 連打で 2 件目が「CONFIRMING 反映前に」
-                // また TAP 送信されると、Phone 側 toggleTranscription で「Idle→start」となり
-                // 録音再開してしまう既知 hazard。NFR-04 (round-trip < 300ms) が満たされてれば
-                // 実機操作で踏みにくいが、根本対策には phone 側に dedup を持たせる必要あり。
-                // 5c (もしくは Phase 4 review 後) で扱う TODO。
+                // Listening 中の Tap 連打で 2 件目が CONFIRMING 反映前に届くと、Phone 側
+                // toggleTranscription で Idle→start に戻り録音再開する hazard あり。
+                // NFR-04 (round-trip < 300ms) 下では実機で踏みにくいが、根本対策には Phone 側
+                // dedup が必要 (TODO)。
                 bridge.sendGesture(GestureKind.TAP)
             }
             GlassGesture.SwipeForward -> _scrollRequest.tryEmit(+SCROLL_STEP)
             GlassGesture.SwipeBack -> _scrollRequest.tryEmit(-SCROLL_STEP)
             GlassGesture.DoubleTap -> {
-                // P1-C of 5b review: 「録音停止 + 入力消去」は専用 wire `ListeningCancel` で
-                // 1 件送信する。旧コードは TAP + SWIPE_BACK の 2 連送信で、Phone GlassEvent
-                // Dispatcher が suspend 順次処理するために中間 CurrentState(CONFIRMING) が
-                // 1 frame 漏れていた (NFR-13 違反相当)。設計書 §4.2 + protocol.ListeningCancel
-                // 既存 wire を活用する。
+                // 「録音停止 + 入力消去」は専用 wire 1 件で atomic に。TAP+SWIPE_BACK の 2 連
+                // 送信だと Phone 側 suspend 順次処理で中間 CONFIRMING が 1 frame 漏れる (NFR-13)。
                 bridge.sendListeningCancel()
             }
         }
@@ -211,8 +175,7 @@ class ConversationStateHolder(
             GlassGesture.SwipeForward, GlassGesture.SwipeBack ->
                 sendChoice.value = current.toggle()
             GlassGesture.Tap -> {
-                // 決定。phone 側で SWIPE_FORWARD/BACK を受けると confirming=false に倒れ、
-                // 続く mode push (IDLE) で UI が抜ける。
+                // 決定。Phone 側で SWIPE_FORWARD/BACK 受信時に confirming=false → IDLE 推移する。
                 when (current) {
                     SendChoice.SEND -> bridge.sendGesture(GestureKind.SWIPE_FORWARD)
                     SendChoice.CANCEL -> bridge.sendGesture(GestureKind.SWIPE_BACK)

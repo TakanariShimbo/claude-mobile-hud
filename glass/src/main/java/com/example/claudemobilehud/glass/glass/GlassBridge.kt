@@ -35,32 +35,20 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Glass 側の唯一の CXR エンドポイント (Phase 3 §4.2)。Phone からの wire event を
- * 受信して内部 [StateFlow] に反映、Glass → Phone は send 系メソッドで送る。
+ * Glass 側の CXR エンドポイント (docs/03 §4.2)。Phone からの wire event を内部
+ * StateFlow に反映、Glass → Phone は send 系メソッドで送る。
  *
- * **NFR-13 atomicity (§4.2.1)**:
- *   - `lastSeenStateSeq`: 既知の CurrentState.seq の最大値。`<= lastSeen` の
- *     CurrentState は stale としてドロップ。
- *   - `pendingInputText: Pair<Int, String>?`: `InputTextOnly` が先行到着した場合に
- *     1 件だけ stash する (parent_seq, text)。後続の CurrentState で同じ seq が
- *     来たら適用、ズレた場合は無視。
- *   - `SessionOpen` を受けたら両方 reset (Phone 再起動を吸収。Phase 2 §4.5.3 B-1)。
+ * atomicity (NFR-13 / docs/03 §4.2.1):
+ * lastSeenStateSeq で CurrentState を stale ドロップ、InputTextOnly が先行到着した
+ * 場合は pendingInputText に 1 件 stash して後続 CurrentState 受信時に適用する。
  *
- * **ライフサイクル**:
- *   - `init(context)`: CXRServiceBridge 初期化 + Phone subscribe。冪等。
- *   - status / sessionOpen / phoneState / ... は process singleton な StateFlow。
- *
- * **テスト可能性**:
- *   - JNI/binder に触れない `internal fun handleWireEvent(event: WireEvent)` を
- *     公開し、JVM 単体テストから wire event を直接打ち込んで atomicity を検証可能。
- *   - `resetStateForTest()` で全状態を初期化できる。
+ * JVM テストは `handleWireEvent` を直接呼べる (CXR binder 非依存)。
  */
 object GlassBridge {
     private val log = StructuredLog("channel.glass.bridge")
     private const val PING_TIMEOUT_MS = 12_000L
 
-    // P2-D of 5a review: bridge は init() (main thread) で書かれ、send 系 / status callback
-    // (binder thread) から読まれる。`@Volatile` で publish の happens-before を保証。
+    // main thread の init() で書かれ、binder thread (status callback / send 系) で読まれる。
     @Volatile
     private var bridge: CXRServiceBridge? = null
     private val capsFactory: CapsFactoryImpl = CapsFactoryImpl()
@@ -85,21 +73,15 @@ object GlassBridge {
     private val _messages = MutableStateFlow<List<ChatMessagePayload>>(emptyList())
     val messages: StateFlow<List<ChatMessagePayload>> = _messages.asStateFlow()
 
-    /**
-     * MessagesEvent の sessionId を message list と pair で公開する。
-     * SoundEffects の SEND 検出で session 切替時の false positive を排除するために必要
-     * (message id は HistoryStore autoinc で session 横断、id 比較だけでは別 session の
-     *  高い id を「自分の send」と誤認する)。既存 `messages` flow との二重 emit を避けるため
-     * 同一の MutableStateFlow を `handleWireEvent` で同時更新する。
-     */
+    // sessionId と messages の atomic pair。SoundEffects.SEND 検出で session 切替時の
+    // 高 id を「自分の send」と誤認しないために必要 (HistoryStore id は session 横断 autoinc)。
     private val _messagesForSession = MutableStateFlow<Pair<String?, List<ChatMessagePayload>>>(null to emptyList())
     val messagesForSession: StateFlow<Pair<String?, List<ChatMessagePayload>>> = _messagesForSession.asStateFlow()
 
     private val _lastError = MutableStateFlow<String?>(null)
     val lastError: StateFlow<String?> = _lastError.asStateFlow()
 
-    // 一過性 event。Phase 3 §4.2: replay=0, buffer=8, DROP_OLDEST。
-    // collector 不在のときに古い通知が貯まらないようにする (HUD は最新だけが意味を持つ)。
+    // HUD は最新通知だけが意味を持つので、collector 不在時に古い通知を貯めない (docs/03 §4.2)。
     private val _notifications = MutableSharedFlow<GlassNotification>(
         replay = 0,
         extraBufferCapacity = 8,
@@ -107,9 +89,8 @@ object GlassBridge {
     )
     val notifications: SharedFlow<GlassNotification> = _notifications.asSharedFlow()
 
-    // §4.2.1 の atomicity state。`@Volatile` を付けないのは、書き換えが必ず main
-    // thread 上 (mainHandler.post 経由) に集約されているため。読み取りも UI thread
-    // から行うので可視性問題は出ない。
+    // 書き込みは mainHandler.post 経由で main thread に集約、読み取りも UI thread なので
+    // @Volatile は不要。
     private var lastSeenStateSeq: Int = 0
     private var pendingInputText: Pair<Int, String>? = null
 
@@ -121,19 +102,17 @@ object GlassBridge {
 
     fun init(@Suppress("UNUSED_PARAMETER") context: Context) {
         if (bridge != null) return
-        // P2-C of 5a review: CXR callback は binder thread。state 更新 + send は全て
-        // mainHandler.post で main thread に集約する (phone GlassConnectionService と同じパターン)。
-        // status callback を直接走らせると `_status.value=CONNECTED` 直後の sendHello が
-        // CXRServiceBridge().apply { ... } の完了前に走るレース (bridge 観測 null) を作りうる。
+        // CXR callback は binder thread。state 更新 / send を mainHandler.post で main
+        // thread に集約しないと、onConnected → sendHello が apply{} 完了前に走り bridge=null
+        // を観測する race がある。
         bridge = CXRServiceBridge().apply {
             setStatusListener(object : CXRServiceBridge.StatusListener {
                 override fun onConnected(p0: String?, p1: String?, p2: Int) {
                     mainHandler.post {
                         log.info("cxr_connected", "pkg" to (p0 ?: ""))
                         _status.value = Status.CONNECTED
-                        // 自プロセス再起動時、phone 側 state は不変なので StateFlow が
-                        // distinctUntilChanged で詰まり再送されない。hello を投げて
-                        // phone GlassRelay.refresh() を強制発火させ最新スナップショットを得る。
+                        // Phone 側 state は distinctUntilChanged で詰まるので、hello を打って
+                        // GlassRelay.refresh() に最新スナップショットを再送させる。
                         sendHello()
                     }
                 }
@@ -156,11 +135,9 @@ object GlassBridge {
             })
             subscribe(CHANNEL_FROM_PHONE, object : CXRServiceBridge.MsgCallback {
                 override fun onReceive(name: String?, args: Caps?, bytes: ByteArray?) {
-                    // CXRServiceBridge は `bytes` を常に null で呼び、ペイロードは `args`
-                    // (Caps) で渡してくる (実機確認済)。`bytes ?: return` 経路だと Phone
-                    // から来る wire event が全部 silent drop される。
+                    // CXR SDK は payload を `args` (Caps) で渡し `bytes` は常に null。
+                    // `bytes ?: return` で受けると全 event を silent drop する (docs/03 §2.5.1)。
                     val caps = args ?: return
-                    // CXR binder thread から呼ばれる。state 更新は main thread に集約。
                     mainHandler.post { dispatchCaps(caps) }
                 }
             })
@@ -176,15 +153,11 @@ object GlassBridge {
         handleWireEvent(event)
     }
 
-    /**
-     * Wire event 1 件を内部 state に反映する純関数 (JNI 非依存)。
-     * JVM 単体テストはこのメソッドを直接呼ぶ。
-     */
+    /** Wire event 1 件を state に反映する純関数。JVM 単体テストはここを直接呼ぶ。 */
     internal fun handleWireEvent(event: WireEvent) {
         when (event) {
             is SessionOpen -> {
-                // Phase 2 §4.5.3 B-1: Phone 再起動を吸収。seq 由来の stale 判定が
-                // 古いプロセスの seq を引きずらないように両方 reset。
+                // Phone 再起動を吸収: 古いプロセスの seq を引きずらないよう atomicity state を reset。
                 lastSeenStateSeq = 0
                 pendingInputText = null
                 _sessionOpen.value = true
@@ -208,7 +181,7 @@ object GlassBridge {
             }
             is NotificationEvent -> emitNotification(event)
             is ErrorEvent -> _lastError.value = event.message
-            // Glass → Phone 系。Glass 側受信経路では現れないが exhaustive にする。
+            // Glass → Phone 系。受信経路では現れないが exhaustive when のため列挙。
             is Hello, is SelectSession, is com.example.claudemobilehud.protocol.GestureEvent,
             is ListeningCancel, is PermissionVerdictEvent -> Unit
         }
@@ -235,12 +208,8 @@ object GlassBridge {
             micSource = event.micSource,
         )
         lastSeenStateSeq = event.seq
-        // P2-E of 5a review: seq advance のたびに pending を必ず再評価する。
-        //   - 旧コード: `if (pending?.first == event.seq) pending = null`。
-        //     parentSeq != event.seq の経路で pending が永遠に残り、将来 logic 拡張で
-        //     ghost を誤 apply するリスクがあった。
-        //   - 新コード: pending.parentSeq > 新 seq の場合のみ "まだ親 state 未着の
-        //     先行 InputTextOnly" として保持。<= の場合は確実に古いので破棄。
+        // pending.parentSeq > 新 seq だけ「親未着の先行 InputTextOnly」として保持、それ以外は破棄。
+        // 旧 `pending.first == event.seq` 比較だと parentSeq != seq の経路で ghost が残った。
         pendingInputText = pendingInputText?.takeIf { it.first > event.seq }
         StructuredLog.glassStateSwap(
             seq = event.seq,
@@ -255,7 +224,6 @@ object GlassBridge {
     private fun handleInputTextOnly(event: InputTextOnly) {
         when {
             event.parentSeq < lastSeenStateSeq -> {
-                // 既に新しい CurrentState が反映済み。古い text 差分は捨てる。
                 log.debug(
                     "input_text_stale_drop",
                     "parent_seq" to event.parentSeq,
@@ -263,16 +231,12 @@ object GlassBridge {
                 )
             }
             event.parentSeq > lastSeenStateSeq -> {
-                // 親 CurrentState 未着で先行到達。1 件だけ stash しておき、後続
-                // CurrentState 受信時に同 seq なら適用する (パイプの順序乱れ吸収)。
+                // 親 CurrentState 未着で先行到達。stash して後続 CurrentState で適用 (順序乱れ吸収)。
                 pendingInputText = event.parentSeq to event.inputText
             }
             else -> {
-                // P2-F of 5a review: 設計書 §4.2.1 (line 1343-1349) 通り、input_text のみ
-                // 差し替えた場合も `glass_state_swap` event でログを出す。AC-09 verifier は
-                // `glass_state_swap` だけを invariant 対象にしているため、独自 event 名
-                // (`glass_input_swap`) を使うと検証から除外され、mode/input_text の整合性が
-                // 静かに無視される。
+                // AC-09 verifier は `glass_state_swap` event だけを invariant 対象にするので、
+                // input_text のみの差し替えでも独自 event 名にせず同 event 名で出す。
                 val next = _phoneState.value.copy(inputText = event.inputText)
                 _phoneState.value = next
                 StructuredLog.glassStateSwap(
@@ -293,10 +257,7 @@ object GlassBridge {
             text = event.text,
             sessionId = event.sessionId,
         )
-        // P3-B of 5a review: `MutableSharedFlow(replay=0, buffer=8, DROP_OLDEST)` の
-        // `tryEmit` は kotlinx.coroutines 仕様で **常に true** を返す (DROP_OLDEST が
-        // 必ず slot を確保する)。旧来の `if (!tryEmit) warn` は dead code だった。
-        // 戻り値を捨て、契約に依存することを明示する。
+        // DROP_OLDEST 指定の tryEmit は仕様上常に true を返すので戻り値は無視。
         _notifications.tryEmit(notif)
     }
 
@@ -333,10 +294,8 @@ object GlassBridge {
                 )
             }
             .getOrNull() ?: return
-        // P3-C of 5a review: CXRServiceBridge.sendMessage の戻り値は SDK constants:
-        //   0 = success, -1 = EINVAL, -2 = EDUP, -3 = EFAULT, -4 = EBUSY
-        // 当面は `r != 0` を非 success として一括ログするが、将来 retry ロジックを
-        // 入れるならここで分岐するための注記を残す。
+        // CXRServiceBridge.sendMessage 戻り値: 0=success, -1=EINVAL, -2=EDUP, -3=EFAULT, -4=EBUSY。
+        // 当面は `r != 0` を一括ログ。retry を入れるならここで分岐する。
         val r = runCatching { b.sendMessage(CHANNEL_TO_PHONE, caps) }
             .onFailure {
                 log.warn(
@@ -358,11 +317,10 @@ object GlassBridge {
     private fun nowMs(): Long = System.currentTimeMillis()
 
     // --- テスト用フック ---
-    // P3-A of 5a review: `@VisibleForTesting(otherwise=NONE)` で production code から
-    // 誤って呼ばれた場合に AndroidX Lint が warning を出す (process singleton state を
-    // production 経路で reset すると壊滅的)。
+    // process singleton state を production から reset すると壊滅的なので
+    // `@VisibleForTesting(otherwise=NONE)` で production 経路を Lint で抑止する。
 
-    /** JVM 単体テスト用。process singleton の state を全部初期化する。 */
+    /** JVM 単体テスト用。process singleton state を初期化する。 */
     @VisibleForTesting(otherwise = VisibleForTesting.NONE)
     internal fun resetStateForTest() {
         lastSeenStateSeq = 0
