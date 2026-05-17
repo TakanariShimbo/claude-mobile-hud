@@ -1,11 +1,6 @@
 package com.example.claudemobilehud.phone.data.error
 
-/**
- * Phone 固有のエラー (`:protocol.SharedWireError` は Phone 直接受けで使用)。Phase 3 §3.7。
- *
- * `SharedWireError.Connection.*` と `SharedWireError.Permission.*` はそのまま使い、ここでは
- * Send / Transcription / Glass-specific を追加する。
- */
+/** docs/03 §3.7: SharedWireError は Phone 直接受け、ここでは Send / Transcription / Glass を追加。 */
 sealed class PhoneWireError {
     sealed class Send : PhoneWireError() {
         data class ImageTooLarge(val actualBytes: Long, val limitBytes: Long) : Send()

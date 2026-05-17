@@ -1337,6 +1337,39 @@ MutableSharedFlow<ByteArray>(extraBufferCapacity = 64, onBufferOverflow = DROP_O
 
 **drop frame sampling log (P2-6)**: `tryEmit` が `false` を返した (= 1 frame drop された) ら `droppedFrames++` し、**10 件目ごとに 1 行 warn** を残す。silent drop は transcript 品質低下に直結するので、実機 deployment 後の field 解析で見えるようにする。
 
+##### 3.2.5.13 `TranscriptionEvent` (正規化された wire event)
+
+`OpenAI Realtime API` から届く JSON event を `EventCodec` (§3.2.5.10) が `TranscriptionEvent`
+sealed interface に正規化:
+
+| variant | 契機 | TranscriptionClient での扱い |
+|---|---|---|
+| `SessionReady` | `session.update` の ack | 受信して音声送信を本格開始 |
+| `Delta(text)` | 中間 transcript (partial) | `state.Listening(partial)` に累積 |
+| `Completed(text)` | 文区切りの確定 | partial をクリア、`finalized` flow へ流す |
+| `Error(message)` | API 側エラー | UI に上げる + `Closed` と組で扱う |
+| `Closed` | WebSocket 切断 | Idle に戻る (この後の emit は無い契約) |
+
+`Delta` を累積した値が `TranscriptionClient.state.Listening(partial)` の `partial` で、
+`Completed` が来た瞬間に partial をクリア + 確定値を `finalized: SharedFlow<String>` に
+流す (`InputController` が confirm 経路に乗せる)。
+
+##### 3.2.5.14 `TranscriptionTransport` (test seam contract)
+
+`TranscriptionWs` (WebSocket transport) を内部 interface として抽象化し、テスト用 fake
+を差し替え可能にする `internal interface TranscriptionTransport`:
+
+| メソッド | 契約 |
+|---|---|
+| `events: Flow<TranscriptionEvent>` | `Closed` 到達後の emit は **無い** ことが契約 |
+| `connect()` | 副作用付き、**冪等** (2 回目以降は no-op) |
+| `sendAudio(base64)` | WS 未接続なら **drop** (例外を投げない、§3.2.5.7 backpressure と同じ "サイレント許容" 方針) |
+| `close()` | 冪等 |
+
+冪等性を契約に含める理由: `TranscriptionClient` のライフサイクル (§3.2.5.3) で `connect` /
+`close` が再入し得る (例: SSE 再接続中に user が talk button 二度押し)。実装側で再入を
+吸収させて、呼び出し側が flag を持たなくてよい設計に倒す。
+
 #### 3.2.6 `Pairing` + `QrScanner`
 
 Hub の `pair` CLI が表示する QR を読み取り `Settings` の接続情報 (`baseUrl` + `token`) に反映する純粋データ層パイプライン。
@@ -2546,6 +2579,25 @@ fun mapToPresentation(error: Any): UiPresentation = when (error) {
     // ...
 }
 ```
+
+#### 3.7.1 `TransientError` (一過性 error の discriminated wrapper)
+
+`ChannelRepository.errors: SharedFlow<TransientError>` の要素型。`:protocol.SharedWireError`
+と Phone-local の `PhoneWireError` を 1 つの sealed で束ねる:
+
+```kotlin
+sealed class TransientError {
+    data class Shared(val error: SharedWireError) : TransientError()
+    data class Phone(val error: PhoneWireError) : TransientError()
+}
+```
+
+UI 側で `mapToPresentation` を経由して `Snackbar / Dialog / Banner` に振り分ける。
+
+**「一過性」の境界線**: ここに流れるのは **snackbar 系の流れて消える error** のみ。
+**永続状態** (例: `AuthFailed` で `reconnect` まで recovery しない) は `ChannelRepository.
+connectivity: StateFlow<ConnectivityState>` 側で扱う (§3.6.5.5)。1 つの error を SharedFlow
+と StateFlow の両方に流すと、UI に同時に banner と snackbar が出てユーザが混乱する。
 
 ### 3.8 通知シェード経由 verdict 経路の Receiver
 
