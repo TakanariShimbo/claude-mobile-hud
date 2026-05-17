@@ -2545,7 +2545,105 @@ Rokid Glass のキーマッピング:
 
 `BACK` は `OnBackPressedDispatcher` に流すと Activity finish するため、`dispatchKeyEvent` で完全に乗っ取り `GestureBus` に `DoubleTap` として emit する。`ACTION_UP` / `LONG_PRESS` は emit せず握りつぶす (`ACTION_DOWN` 1 回のみ)。`@Suppress("GestureBackNavigation", "RestrictedApi")` で lint 警告を抑制。
 
-### 4.6 構造化ログ
+### 4.6 `GlassGesture` + `GestureBus`
+
+Glass 側で発生したジェスチャを表す内部 sealed (`Tap` / `DoubleTap` / `SwipeForward` / `SwipeBack`、FR-GL-10〜14)。物理リモコン (`MainActivity.dispatchKeyEvent`、§4.5.4) と CXR-L 受信ジェスチャを統一形で UI に流す。
+
+#### 4.6.1 protocol `GestureKind` との分離
+
+wire の `protocol.GestureKind` と **2 つに分けている理由**:
+- `GlassGesture` は Glass 内部 (UI dispatch) 用
+- `GestureKind` は Phone への wire enum
+- `GlassGesture.DoubleTap` は **「会話画面で取消」「session 選択画面で終了」** など local 操作にも使う (= wire 送信せずに完結するケースがある)。直接 protocol 層に結びつけると wire vs local の混在が型から読めなくなる
+
+```kotlin
+fun GlassGesture.toWireKind(): GestureKind? = when (this) {
+    Tap -> TAP
+    DoubleTap -> DOUBLE_TAP
+    SwipeForward -> SWIPE_FORWARD
+    SwipeBack -> SWIPE_BACK
+}
+```
+
+`toWireKind` は wire 送信時のみ呼ばれる変換 helper。
+
+#### 4.6.2 `GestureBus` buffer policy (P3-A)
+
+```kotlin
+object GestureBus {
+    private val _events = MutableSharedFlow<GlassGesture>(
+        replay = 0,
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    ...
+}
+```
+
+- **`replay = 0`**: 過去 gesture を後着 subscriber に渡さない (HUD 操作は「今ここの操作」なので過去 replay は無意味)
+- **`extraBufferCapacity = 8`**: 連打を吸収
+- **`onBufferOverflow = DROP_OLDEST`** (P3-A): default の `SUSPEND` だと `tryEmit` が `false` を返して **新着** gesture が drop される。HUD 操作的には「古い gesture を捨てて新しいのを残す」のが直感的
+
+### 4.7 `SoundEffects`
+
+Glass app の全効果音を 1 箇所に集約 (旧 `NotificationSound` + UI feedback)。
+
+#### 4.7.1 5 種類の Kind と契機
+
+| Kind | 契機 | 検出箇所 |
+|---|---|---|
+| `INCOMING_REPLY` | Phone からの reply 通知 | `MainActivity` `notifications.collect` |
+| `INCOMING_PERMISSION` | Phone からの permission 通知 | 同上、chime 2 連 (220ms 間隔、FR-GL-71) |
+| `SEND` | OUTGOING message の最大 id が増加 | `MainActivity` `messagesForSession.collect` (§4.5.2) |
+| `RECORD_START` | TAP 押下時点 (state 遷移を待たない) | `ConversationStateHolder.handleIdle` (§4.5.2) |
+| `RECORD_STOP` | `transcriptState` が `LISTENING → 非LISTENING` | `MainActivity` `phoneState.collect` (§4.5.2) |
+
+検出は呼び出し側の `collect` で行い、`SoundEffects` は再生だけ担当する責務分離。
+
+#### 4.7.2 context-less `play(Kind)`
+
+`init(context: Context)` で application context を `@Volatile appContext` に保存し、以降は `play(kind: Kind)` で context 引数なしに再生可能:
+
+```kotlin
+fun play(kind: Kind) {
+    val ctx = appContext ?: return
+    play(ctx, kind)
+}
+```
+
+Compose 非依存層 (`ConversationStateHolder.handleIdle` の RECORD_START 先行発火、§4.5.2) から context を引き回さず使うため。未 `init` の場合は silent no-op (JVM unit test 経路で安全)。
+
+#### 4.7.3 MediaPlayer leak 防止 (P2-B)
+
+`MediaPlayer.create` 後、`setAudioAttributes` 等で **`start()` 前** に例外を投げると、`OnCompletionListener` が登録されないので release されず leak する:
+
+```kotlin
+val player = runCatching { MediaPlayer.create(context, resId) }.getOrNull() ?: return
+try {
+    player.setAudioAttributes(...)
+    player.setOnCompletionListener { runCatching { it.release() } }
+    player.setOnErrorListener { mp, _, _ -> runCatching { mp.release() }; true }
+    player.start()
+} catch (t: Throwable) {
+    runCatching { player.release() }   // ← create 後の throw を全部 catch して release
+    log.warn("sfx_play_failed", t, ...)
+}
+```
+
+`OnCompletionListener` と `OnErrorListener` の両方で release を呼ぶことで、再生中の error も最終的に release される。複数連発時は MediaPlayer インスタンスを別々に作る (同一 instance を使い回すと再生中の release 競合)。
+
+#### 4.7.4 `NotificationKind → Kind` 変換
+
+```kotlin
+fun play(context: Context, kind: NotificationKind) = play(context, when (kind) {
+    NotificationKind.REPLY -> Kind.INCOMING_REPLY
+    NotificationKind.PERMISSION -> Kind.INCOMING_PERMISSION
+})
+```
+
+incoming 通知 collect 経路の glue (`MainActivity.notifications.collect`)。FR-GL-71 の chime 2 連は `play(Kind.INCOMING_PERMISSION)` 経由で `Handler.postDelayed(220ms)` する (§4.7.1)。
+
+### 4.8 構造化ログ
 
 ```kotlin
 object StructuredLog {

@@ -9,21 +9,8 @@ import com.example.claudemobilehud.glass.log.StructuredLog
 import com.example.claudemobilehud.protocol.NotificationKind
 
 /**
- * Glass app の全効果音を 1 箇所に集約 (旧 NotificationSound + UI feedback)。
- *
- * 鳴らす契機:
- *   - INCOMING_REPLY:       Phone からの reply 通知 → chime 1 回
- *   - INCOMING_PERMISSION:  Phone からの permission 通知 → chime 2 連 (220ms 間隔; FR-GL-71)
- *   - SEND:                 OUTGOING message の最大 id が増加 (MessagesEvent)
- *   - RECORD_START:         CurrentState.transcriptState が `→ LISTENING`
- *   - RECORD_STOP:          CurrentState.transcriptState が `LISTENING →`
- *
- * 検出は MainActivity 側の collect で行い、ここは単に再生だけ担当。
- *
- * MediaPlayer は再生完了で release。複数連発時はインスタンスを別々に作る。
- * P2-B of 5a review: MediaPlayer は start() 前に setAudioAttributes 等で throw した
- * 場合、completion listener が登録されないので release されず leak する。create 後は
- * try/catch で囲み、何が起きても release する経路を用意する。
+ * Glass app の全効果音を集約 (docs/03 §4.7)。5 種 Kind の契機 (§4.7.1)、context-less play
+ * (§4.7.2)、MediaPlayer leak 防止 (§4.7.3 P2-B)、NotificationKind 変換 (§4.7.4) を参照。
  */
 object SoundEffects {
     private val log = StructuredLog("channel.glass.sfx")
@@ -34,18 +21,10 @@ object SoundEffects {
 
     enum class Kind { INCOMING_REPLY, INCOMING_PERMISSION, SEND, RECORD_START, RECORD_STOP }
 
-    /**
-     * Application context を 1 回保存。以後 `play(kind)` で context 引数なしに再生可能。
-     * Glass `MainActivity.onCreate` 内 GlassBridge.init の直後に呼ぶ。
-     */
     fun init(context: Context) {
         appContext = context.applicationContext
     }
 
-    /**
-     * `init()` 済みなら再生、未 init なら silent no-op (JVM unit test 経路で安全)。
-     * Compose 非依存層 (ConversationStateHolder 等) から context を引き回さず使うため。
-     */
     fun play(kind: Kind) {
         val ctx = appContext ?: return
         play(ctx, kind)
@@ -67,7 +46,6 @@ object SoundEffects {
         }
     }
 
-    /** NotificationKind → Kind 変換 (incoming 通知 collect 経路の glue)。 */
     fun play(context: Context, kind: NotificationKind) {
         val mapped = when (kind) {
             NotificationKind.REPLY -> Kind.INCOMING_REPLY
@@ -95,6 +73,7 @@ object SoundEffects {
             }
             player.start()
         } catch (t: Throwable) {
+            // docs/03 §4.7.3: start() 前 throw も release を保証する経路。
             runCatching { player.release() }
             log.warn("sfx_play_failed", t, "kind" to kind.name.lowercase())
         }
