@@ -46,8 +46,26 @@ class ChannelService : Service() {
         // ensureChannels は idempotent。
         NotificationFactory.ensureChannels(this)
         startForegroundCompat("起動中...")
+        // P2-1 of review: cold-start gap 対策。Application 死亡中に発生した permission の
+        // 通知が shade に残っていて、起動時には `_pendingPermissions` が空で start するので
+        // 後続の diff collector では cancel されない (lastIds=empty / current=empty で
+        // removed が常に empty)。channel = PERMISSION の通知を一旦全 cancel し、Hub 側の
+        // 再 push (FR-HU-14: snapshot 後に個別 permission を続けて送る) で必要なものは
+        // 再 notify されるので、shade の幽霊通知が確実に消える。
+        cancelStaleStartupPermissionNotifications()
         observerJob = scope.launch { observe() }
         log.info("on_create")
+    }
+
+    private fun cancelStaleStartupPermissionNotifications() {
+        val notifMgr = getSystemService(NotificationManager::class.java) ?: return
+        val active = notifMgr.activeNotifications ?: return
+        for (sbn in active) {
+            if (sbn.notification.channelId == NotificationFactory.CHANNEL_PERMISSION) {
+                notifMgr.cancel(sbn.id)
+                log.info("permission_cleared_on_startup", "notif_id" to sbn.id)
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -74,6 +92,32 @@ class ChannelService : Service() {
         scope.launch {
             repo.connectivity.collectLatest { conn ->
                 startForegroundCompat(connectionLabel(conn))
+            }
+        }
+        // permission 通知の cancel: pendingPermissions の diff を取り、消えた id の
+        // 通知を NotificationManager.cancel する。これで以下の経路を統一処理:
+        //   - 個別 verdict 成功 (VerdictDispatchService が extras 経由で cancel するのと、
+        //     PermissionActionReceiver が optimistic pre-dispatch cancel するのに加えた
+        //     3 経路目。すべて idempotent なので重複 OK)
+        //   - PermissionAbort 受信
+        //   - permission_snapshot で空集合 reconcile (Hub 再起動経路、FR-HU-15)
+        // ChannelService が死んでた間の差分は startup の cancelStaleStartupPermissionNotifications
+        // で別途処理する (P2-1 cold-start gap 対策)。
+        scope.launch {
+            var lastIds = emptySet<String>()
+            repo.pendingPermissions.collect { current ->
+                val currentIds = current.mapTo(mutableSetOf()) { it.requestId }
+                val removed = lastIds - currentIds
+                for (requestId in removed) {
+                    val notifId = NotificationFactory.NOTIF_PERMISSION_BASE + requestId.hashCode()
+                    notifMgr?.cancel(notifId)
+                    log.info(
+                        "permission_canceled",
+                        "request_id" to requestId,
+                        "notif_id" to notifId,
+                    )
+                }
+                lastIds = currentIds
             }
         }
         repo.events.collectLatest { event ->

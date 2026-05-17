@@ -1693,8 +1693,33 @@ Phone が SSE で再接続:
 1. `session_snapshot { active_session_ids: [] }` を送出 (空、Bridge 未登録)
 2. `permission_snapshot { request_ids: [] }` を送出 (outstanding ゼロ)
 3. Phone 側で local pending = {} ∩ {} = {} にリセット (AD-13)
+4. Phone 側 `ChannelService` が `pendingPermissions` の diff (= 全削除) を検知し、
+   shade に残っていた permission 通知を `NotificationManager.cancel` する
 
 Bridge が順次再接続して register してきたら通常運用に戻る。
+
+**ただし重要な運用注意**: `Bridge` は Hub からの remote close (TCP 切断) を検知すると、
+`bridge/src/index.ts` の `onClose` ハンドラで `shutdown("hub_remote_close")` を呼んで
+**自殺する**。これにより Hub crash 時の処理は以下のセット運用が前提:
+
+- Hub crash → Bridge も自殺 → claude プロセスは alive のまま MCP server (= Bridge)
+  不在で stuck (CLI 画面は permission elicitInput のまま固まる)
+- Phone 側は AD-13 通り、Bridge 不在で Hub 再起動後の SSE snapshot を受けて幽霊 pending
+  と shade 通知を一掃する → ユーザ視点では「Phone は綺麗な状態」
+- ユーザは **claude wrapper を Ctrl-C で停止 → 再起動** する必要がある (Hub 単独再起動
+  はサポートされない)
+
+Phase 4 ではこの「Bridge 自殺 + wrapper 再起動」が異常系のサポート運用。Phase 5 以降で
+Bridge auto-reconnect + outstanding resend を実装すれば、Hub 単独再起動も透過的に乗り
+越えられる (= 設計拡張余地、本書 Phase 5 引き継ぎに記載)。
+
+##### 5.3.1 Phone 側 cold-start gap (Phase 4 で対処)
+
+`ChannelService` (Phone) が死んでた間に Hub が permission を発行 + abort、その間に
+Application が再起動した場合、SSE 接続前の `_pendingPermissions` は空で start するので
+diff collector が見逃すケースがある (shade に幽霊通知が残る)。対処として `ChannelService.
+onCreate` で `CHANNEL_PERMISSION` の active 通知を一旦全 cancel し、SSE 接続後の `permission`
+個別 event (FR-HU-14 で snapshot 後に続く) で必要なものを再 notify させる方式を採用。
 
 ### 5.4 wire 型 (Phone↔Hub JSON)
 
