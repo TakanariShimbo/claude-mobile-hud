@@ -1917,17 +1917,81 @@ val tokenError = remember(token) {
 
 **保存時の正規化**: `baseUrl.trimEnd('/')` で末尾 slash を取り除いてから保存 (`Pairing.parse` と同じ正規化)。
 
+##### 3.5.1.3 Phone `MainActivity` (Activity host)
+
+Phone app の唯一の `Activity` (`singleTask` で 2 つ目のインスタンスは作らない)。責務:
+
+- Compose UI (`MainScreen`) の host
+- 通知タップ → `onNewIntent` で extras を読んで該当 session に切替 (§3.6.4)
+- Hi Rokid 認可結果 → `onActivityResult` で `TokenStore.save`
+- `POST_NOTIFICATIONS` runtime permission の取得 (Android 13+)
+
+**通知連打 race 回避 (P2-B)**: 旧版は `LaunchedEffect(pendingSessionId) { viewModel.selectSession(target) }` を使っていたが、通知連打で `pendingSessionId` が上書きされた場合、**前の `select` が in-flight のまま新しい `select` と race** する。現行は `snapshotFlow + collectLatest` セマンティクスにして「新しい値が来たら前の select を cancel」に倒す:
+
+```kotlin
+LaunchedEffect(Unit) {
+    snapshotFlow { pendingSessionId }
+        .collectLatest { target ->
+            if (target != null) {
+                viewModel.selectSession(target)
+                pendingSessionId = null   // 1 回消費
+            }
+        }
+}
+```
+
+`onCreate` の `intent.extractSessionId()` で **kill 状態から通知タップ起動された経路** の初回 `pendingSessionId` も拾う。
+
+**`POST_NOTIFICATIONS` (Android 13+)**: 未許可だと OS が reply/permission 通知を silent drop するため、app 起動時に 1 回 `RequestPermission` を出す。callback は log のみで拒否時の retry は user の Settings 経由に任せる。
+
+**`onActivityResult` deprecation の取り扱い (P2-C)**: `AuthorizationHelper.requestAuthorization` が legacy `startActivityForResult` API しか提供しないため、modern `ActivityResultContracts.StartActivityForResult` への移行は SDK 側が許す時まで待つ。現状は `@Deprecated` + `@Suppress("DEPRECATION")` で抑制。
+
 #### 3.5.2 `ChatViewModel`
 
 ```kotlin
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
-    private val repository = AppContainer.repository
+    private val repository: ChannelRepository =
+        (application as PhoneApplication).container.repository
     val uiState: StateFlow<PhoneUiState> = repository.uiState
     val settings: StateFlow<Settings> = repository.settings
     val connectivity: StateFlow<ConnectivityState> = repository.connectivity
+    val inputText: StateFlow<String> = repository.inputText
+    val transcriptionState: StateFlow<TranscriptionClient.State> = repository.input.transcription.state
+    val errors: SharedFlow<TransientError> = repository.errors
+    val events: SharedFlow<ChannelEvent> = repository.events
     // ...
 }
 ```
+
+##### 3.5.2.1 設計契約
+
+- **薄い委譲層**: すべての suspend action (`send` / `selectSession` / `saveSettings` 等) は `viewModelScope.launch` で wrap し、UI 側は fire-and-forget で呼べる
+- **Repository 取得経路**: `(application as PhoneApplication).container.repository`。`AppContainer` 初期化前に ViewModel が作られる経路は無い (MainActivity が Application 起動を経由する)
+- **同期 getter**: 純粋な state mutation (`attachImage` / `clearAttachedImage` / `updateInputText`) は suspend 不要なので非 launch で直接委譲
+
+##### 3.5.2.2 `send` 引数の snapshot 化 (P1-C)
+
+`send(text)` を呼ぶ際は **呼び出し側で snapshot 化したテキストを引数で渡す**。`repository.send(inputText.value)` 形にすると次の race を踏む:
+
+1. ユーザがボタン click
+2. ViewModel.send 呼ばれる
+3. `viewModelScope.launch { ... }` 起動 (まだ実行されていない)
+4. その間に IME composition 遅延入力 / transcription partial 更新で `inputText` が変化
+5. launch 実行時に変わった `inputText.value` を読んで送信
+
+ボタン click 時点で UI 側が `text` を確定させて引数経由で渡すことで、launch 起動の隙間に割り込まれない契約にする。
+
+##### 3.5.2.3 `attachImageFromUri` の Repository 集約 (P2-E)
+
+Picker から来た `Uri` の取込を ViewModel ではなく **Repository に集約**する:
+
+```kotlin
+fun attachImageFromUri(uri: Uri) {
+    viewModelScope.launch { repository.attachImageFromUri(uri) }
+}
+```
+
+失敗時は `Repository._errors` 経由で `MainScreenEffects.toUserMessage` の localized snackbar 経路を通る (§3.7)。ViewModel 側で `ImageProcessor.encode` 直呼びにすると error 翻訳が UI 層に漏れる。
 
 #### 3.5.3 Compose recomposition 戦略 (AD-18)
 
