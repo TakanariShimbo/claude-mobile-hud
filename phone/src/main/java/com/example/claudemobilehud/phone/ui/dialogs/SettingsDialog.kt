@@ -106,11 +106,28 @@ fun SettingsDialog(
                     singleLine = true,
                 )
                 Spacer(Modifier.height(8.dp))
+                // P3 of 4d review (#189): token は OkHttp の HTTP header value 制約
+                // (ASCII printable 0x20-0x7E) 内でないと送信時に IllegalArgumentException
+                // で死ぬ (ChannelClient で AuthFailed に翻訳済みだが、ここで入力段階で
+                // 弾く方がラウンドトリップ削減できて UX 良い)。
+                val tokenError = remember(token) {
+                    val invalidIdx = token.indexOfFirst { c ->
+                        c.code < 0x20 || c.code > 0x7E
+                    }
+                    if (invalidIdx >= 0) {
+                        "ASCII 印字可能文字 (0x20-0x7E) のみ使えます。" +
+                            "貼り付け時に non-ASCII 文字が混入していないか確認してください。"
+                    } else {
+                        null
+                    }
+                }
                 OutlinedTextField(
                     value = token,
                     onValueChange = { token = it },
                     label = { Text("X-Token") },
                     singleLine = true,
+                    isError = tokenError != null,
+                    supportingText = tokenError?.let { msg -> { Text(msg) } },
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -140,6 +157,9 @@ fun SettingsDialog(
             }
         },
         confirmButton = {
+            // tokenError は text section の上で計算済み (token に依存する derived state)。
+            // ここで参照したいが composition 階層が違うのでもう一度計算する (cheap).
+            val tokenInvalid = token.any { c -> c.code < 0x20 || c.code > 0x7E }
             FilledTonalButton(
                 onClick = {
                     onSave(
@@ -150,7 +170,7 @@ fun SettingsDialog(
                         ),
                     )
                 },
-                enabled = url.isNotBlank() && token.isNotBlank(),
+                enabled = url.isNotBlank() && token.isNotBlank() && !tokenInvalid,
             ) { Text("保存") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } },
