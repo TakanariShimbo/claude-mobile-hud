@@ -2874,6 +2874,21 @@ data class PhoneState(
 
 immutable な data class。`GlassBridge` 内の `_phoneState: MutableStateFlow<PhoneState>` を**新規インスタンスでのみ swap**。
 
+#### 4.3.1 `pendingPermission` の `PendingPermissionPayload` 直接再利用
+
+`PhoneState.pendingPermission` は `:protocol.PendingPermissionPayload` を **そのまま**
+持つ (Glass-local の dedicated 型を作らない)。Phone 側 `PendingPermission` (§3.6.5.6)
+が `toWirePayload()` で同型を作るので、CXR 受信 → Glass UI 表示まで wire 型のままで
+通る。Glass 専用 model に詰め替える分岐を消すことで、`@SerialName` の追跡 (`requestId`
+vs `request_id`) を 1 箇所に集約できる。
+
+#### 4.3.2 `GlassNotification` (一過性 banner event)
+
+通知時 banner の一過性 event 用に `GlassNotification(kind, text, sessionId)` を併設。
+CXR wire の `NotificationEvent` を Compose 観点で `@Immutable` annotation 付きの
+data class として持ち直したもの。Glass UI は SharedFlow で受けて短時間表示するだけ
+なので、`@Immutable` で stable inference を効かせる目的のみの薄い wrapper。
+
 ### 4.4 `ConversationStateHolder`
 
 `PhoneState` を 1 つの上流とする state holder。詳細 (sealed State / SendChoice / PermissionChoice) は Rev 1 通り。
@@ -3189,7 +3204,87 @@ if (pm.isInteractive) {
 
 Compose の `DisposableEffect.onDispose { handle.close() }` で必ず呼ぶ契約 (`ConversationScreen` §4.8.7)。
 
-### 4.11 構造化ログ
+### 4.11 Glass UI 補助モジュール
+
+§4.7〜4.10 で扱った主要 composable / manager の補助ピース。それぞれ単機能で短いが、
+HUD 固有の制約 (単色緑 / 細い border / NavHost / DoubleTap = 終了) から派生した非自明な
+WHY を 1 箇所に集約する。
+
+#### 4.11.1 `theme/Color.kt` (HUD 緑パレット)
+
+Rokid Glass は **単色緑モノクロ HUD**。輝度のみが効くが、ソース側を全部緑系で揃えると
+HUD 発色 と PC mirror (scrcpy) の見え方のトーンが一致して開発中の視認性が上がる。
+
+| 役割 | HEX | 用途 |
+|---|---|---|
+| `TextGreen` | `0xFF4DFF6F` | active テキスト (明るい緑) |
+| `TextGreenDim` | `0xFF7FCC8A` | hint / inactive (やや暗い緑) |
+| `TextInactive` | `0xFF5DB070` | 非選択行 / 非 latest メッセージ |
+| `TextChevronDim` | `0xFF4A8C58` | focus 矢印 ▶ の非 focused 側 |
+| `GlassBackground` | `Color.Black` | 背景 |
+
+**G チャンネル輝度の選択根拠**: `TextInactive` の `G=0xB0` (176) は max 255 から十分
+落ちる読みやすい輝度。`0x80` (128) だと HUD では暗すぎて読めなくなる (実機計測)。
+
+#### 4.11.2 `SessionNavigator` (signal-only nav bus)
+
+通知 / CXR 経由の自動遷移を Compose の NavController に橋渡しする小さな bus
+(`MutableSharedFlow<Unit>(extraBufferCapacity = 4)`):
+
+- `MainActivity (lifecycleScope)` から `requestConversation()` を呼ぶ
+- `NavHost` を持つ composable が `LaunchedEffect` で `requests.collect { ... }` し
+  `nav.navigate(GlassRoutes.CONVERSATION)` を実行
+
+**`Unit` で十分な理由**: 「conversation 画面を出して」という signal のみで、どの
+session に行くかは **Phone 側 currentSessionId が真実**。caller は別途
+`GlassBridge.sendSelectSession(id)` を叩く前提なので、payload を bus に乗せない設計。
+
+#### 4.11.3 `GlassNavHost` (2 route + pop semantics)
+
+```
+SESSION_SELECT (startDestination)
+    └── (tap で選択) → CONVERSATION
+                          └── (back) → popBackStack(SESSION_SELECT)
+```
+
+CONVERSATION からの戻りは `nav.popBackStack(SESSION_SELECT, inclusive = false)`。
+SESSION_SELECT への遷移時は `launchSingleTop = true` + `popUpTo(SESSION_SELECT) {
+inclusive = false }` で stack 重複を防ぐ。
+
+**FR-GL-52 (セッション跨ぎで確認状態を保持) は未対応 — P2-B 5b review**: 上の
+`popBackStack(inclusive = false)` は CONVERSATION の back stack entry を **dispose**
+する → 再 nav で `ConversationStateHolder` の `remember` 状態 (`sendChoice` /
+`permissionChoice` のホバー位置) が破棄される。FR-GL-52 は Should 要件で 5c 以降の
+課題として保留。実装するときは Holder の state を Activity 層 (ViewModel 等) に持ち
+上げる必要がある。
+
+#### 4.11.4 `PhoneConnectionGate` (CXR-L 接続 gate + 早期 DoubleTap 受け)
+
+`GlassBridge.sessionOpen: StateFlow<Boolean>` を観測し、`true` のときだけ content
+(NavHost) を mount する gate。Phase 3 §4.4 + FR-GL-02 / FR-GL-05。
+
+**未接続中の DoubleTap = 終了 を専用 LaunchedEffect で受ける**: 未接続中は
+SessionSelect / Conversation がマウントされないため、DoubleTap を誰も拾わない。Gate
+側で `LaunchedEffect(Unit) { GestureBus.events.first { it == DoubleTap }; onExit() }`
+を購読する。接続成立で if 分岐が剥がれると LaunchedEffect は終了する (`DisposableEffect`
+不要)。
+
+**P1-B 5b review (`first` vs `collect`)**: 当初 `collect` 内で待っていたが、`onExit()` →
+`finish()` が非同期に完了するまで collector がループに残り、**連打 DoubleTap で
+onExit が 2 回呼ばれる race** があった。`first { ... }` で 1 件で抜けて以降の
+DoubleTap は bus に積まれるだけにする (= 多重 finish 防止)。
+
+未接続中の status text は `GlassBridge.status` に応じて `phone 待機中… (CONNECTED)` /
+`phone 接続中… (CONNECTING)` / `phone と接続待ち (DISCONNECTED)` を出し分ける。
+
+#### 4.11.5 `ChatFrame` (border-only HUD container)
+
+会話領域を囲む細いグリーンの枠 (`RoundedCornerShape(10.dp)` + `border(1.dp, TextGreen,
+shape)`)。**塗りつぶしを使わない理由**: Rokid HUD は緑モノクロで、塗りつぶしは目に
+眩しい (1 dp 単位の輝度差を読むデバイス特性)。領域分けは細い border 1 つで表現し、
+中身は黒背景のまま読ませる方針。
+
+### 4.12 構造化ログ
 
 ```kotlin
 object StructuredLog {

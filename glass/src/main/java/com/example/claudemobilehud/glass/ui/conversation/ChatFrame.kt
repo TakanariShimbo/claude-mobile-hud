@@ -9,10 +9,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.example.claudemobilehud.glass.ui.theme.TextGreen
 
-/**
- * 会話領域を囲む細いグリーンの枠。Rokid HUD では塗りつぶしは眩しいので、領域分けはこの
- * border だけで表現する。
- */
+/** docs/03 §4.11.5: HUD は塗りつぶしが眩しいので border 1dp + 黒背景で領域分け。 */
 @Composable
 fun ChatFrame(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val shape = RoundedCornerShape(10.dp)

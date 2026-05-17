@@ -402,7 +402,7 @@ class ChannelRepository(
                     toolName = event.toolName,
                     description = event.description,
                     inputPreview = event.inputPreview,
-                    // wire に createdAtMs が無いため受信時刻で代用 (docs/03 §4.3.1)。
+                    // wire に createdAtMs が無いため受信時刻で代用 (docs/02 §4.3.1 Phone↔Hub wire shape)。
                     // 真の Hub 側順序は permission_snapshot.request_ids が持つ。
                     createdAtMs = System.currentTimeMillis(),
                 )

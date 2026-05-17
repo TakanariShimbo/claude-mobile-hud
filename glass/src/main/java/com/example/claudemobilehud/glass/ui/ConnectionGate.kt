@@ -19,14 +19,7 @@ import com.example.claudemobilehud.glass.glass.GlassBridge
 import com.example.claudemobilehud.glass.ui.theme.TextGreenDim
 import kotlinx.coroutines.flow.first
 
-/**
- * Phone との CXR-L 接続が "session 開通" 状態のときだけ [content] を表示する gate。
- * Phase 3 §4.4 + FR-GL-02 / FR-GL-05。
- *
- * 未接続中は SessionSelect / Conversation がマウントされず、DoubleTap = 終了 のジェスチャを
- * 誰も拾わない。そのためここで明示的に DoubleTap だけ購読して [onExit] へ流す。接続成立で
- * if 分岐が剥がれて LaunchedEffect は終了する (DisposableEffect 不要)。
- */
+/** docs/03 §4.11.4: CXR-L sessionOpen で content を gate。未接続中の DoubleTap を first で 1 件だけ受ける (P1-B)。 */
 @Composable
 fun PhoneConnectionGate(
     onExit: () -> Unit,
@@ -36,10 +29,7 @@ fun PhoneConnectionGate(
     val open by GlassBridge.sessionOpen.collectAsStateWithLifecycle()
 
     if (!open) {
-        // P1-B of 5b review: `collect` で DoubleTap を待つと、`onExit()`→`finish()` が
-        // 非同期に終わるまで collector がループに残り、連打 DoubleTap で onExit が
-        // 2 回呼ばれる race があった。`first { ... }` で 1 件で抜け、以降の DoubleTap は
-        // bus に積まれるだけにする。
+        // docs/03 §4.11.4: first で 1 件抜け、連打 DoubleTap での多重 onExit を防ぐ。
         LaunchedEffect(Unit) {
             GestureBus.events.first { it == GlassGesture.DoubleTap }
             onExit()
