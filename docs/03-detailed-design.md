@@ -1028,6 +1028,62 @@ Hub の guard を通過していても、JSON 上で `null` literal や空文字
 - **ML Kit は外部から閉じる API を提供しない**: coroutine cancel が来ても scanner Activity を dismiss する手段は無い。`invokeOnCancellation` は登録するが no-op で、後続の Success/Cancel listener の `cont.isActive` チェックで二重 resume を防ぐ
 - **テスト不在**: 中身は GMS / ML Kit への薄いラップ。Robolectric / GMS mock は coverage 比でコスト過大。`Pairing.parse` 側の pure unit test で payload 解析を完全に固める方針
 
+#### 3.2.7 `ImageProcessor`
+
+画像添付の取り込みパイプライン。Picker から来た `Uri` を Phone-local cache に複製して `ImageAttachment` を返す。
+
+##### 3.2.7.1 cache-first 戦略
+
+base64 化は send 直前 (Bridge への POST 段階) に行う設計なので、`ImageProcessor` は **cache file への複製 + メタデータ採取** までに責務を絞る:
+
+```kotlin
+val cacheFile = File(context.cacheDir, "attach-${UUID.randomUUID()}.bin")
+resolver.openInputStream(uri)?.use { input ->
+    cacheFile.outputStream().use { output -> input.copyTo(output) }
+}
+```
+
+長期保管は path のみで済むので、Repository のメモリプレッシャ・recomposition コストを抑える。
+
+##### 3.2.7.2 サイズ上限 11MB の根拠
+
+```kotlin
+private const val MAX_BYTES: Long = 11L * 1024 * 1024
+```
+
+Hub 側 `BODY_LIMIT_BYTES = 16MB` (image_base64 込みの POST body)。base64 化で 4/3 倍 (≒ 21.3%) 膨らむ + JSON フレーム overhead を見込んで **raw 上限は 11MB** に決定 (11 × 4/3 ≒ 14.7MB < 16MB)。Picker 受け取り時点で fail-fast させ、Hub に大容量 upload を投げてから 413 で叩き落とされる UX を避ける。
+
+##### 3.2.7.3 解像度測定: `inJustDecodeBounds`
+
+```kotlin
+val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+BitmapFactory.decodeFile(cacheFile.absolutePath, opts)
+val longest = maxOf(opts.outWidth, opts.outHeight).coerceAtLeast(0)
+```
+
+`inJustDecodeBounds = true` は **pixel data を allocate せず幅高さだけ取得** する。`ImageAttachment.longestEdge` は UI 側 thumbnail の生成 hint に使う。
+
+##### 3.2.7.4 失敗時の cache 即削除 + typed wire error (P2-E, P2-F)
+
+すべての失敗経路で cache file を即 delete (cacheDir に残しっぱなしを防ぐ):
+
+```kotlin
+try { ... } catch (t: Throwable) {
+    runCatching { cacheFile.delete() }
+    throw t
+}
+```
+
+`IllegalArgumentException` の生 `message` を UI に流すと i18n / フォーマットが既存経路と一貫しないため、**`PhoneWireError.Send.ImageTooLarge.asException()` の typed wire 例外** で投げる。Repository 側の `emitErrorFromThrowable` が `errors` flow に流し、`MainScreenEffects.toUserMessage` がローカライズされた snackbar 文字列を生成する経路に乗る (§3.7)。
+
+##### 3.2.7.5 意図的に省略している機能
+
+現スコープでは不要として落とす:
+
+- **自動リサイズ / 再エンコード**: Bridge 側で行う (Phone は raw を渡すだけ)
+- **EXIF 回転補正**: Compose の画像表示側で吸収
+- **HEIC 変換**: Android picker がデコード可能な形式に依存 (新しい端末はだいたい OK)
+
 ### 3.3 service 層
 
 #### 3.3.1 `AppLifecycleController` (state machine 完全列挙、Rev 2 修正)
@@ -1546,6 +1602,41 @@ private suspend fun handleGesture(which: GestureKind) {
 ```
 
 詳細な CONFIRMING mode の駆動表は §3.2.1.2.2 を参照。
+
+#### 3.4.3 `BtAudioRouter` (Bluetooth SCO 経由の Glass mic)
+
+`InputController.AudioRouter` 実装。Rokid Glass は BT 通話デバイスとして見えるので、Phone の Communication Device をこれに切り替えると `AudioRecord` が自然と Glass mic を読むようになる (CXR-L は不要)。`routeToGlassMic()` / `restore()` は **対で呼ぶ契約**で、`InputController` が責任を持つ。
+
+##### 3.4.3.1 切替シーケンス
+
+```
+routeToGlassMic():
+  savedMode = am.mode
+  am.mode = MODE_IN_COMMUNICATION
+  bt = am.firstBtCommDevice()          ← runCatching で SecurityException も吸収
+  if (bt == null) { am.mode = savedMode; return false }
+  ok = am.setCommunicationDevice(bt)   ← runCatching
+  if (!ok) am.mode = savedMode
+  return ok
+
+restore():
+  if (routed) am.clearCommunicationDevice()
+  am.mode = savedMode
+```
+
+失敗時 (BT device 不在 / `SecurityException` / 権限不足) は `false` を返し、呼び出し側で **PHONE_FALLBACK + `BtScoUnavailable` error emit** に倒す (§3.2.5.6 と整合)。
+
+##### 3.4.3.2 `BLUETOOTH_CONNECT` runtime perm (P3-5)
+
+API 31+ で **`BLUETOOTH_CONNECT` は runtime permission**。Manifest だけでは足りず、実行時に granted を確認するか `SecurityException` を全 BT path で catch する必要がある。本実装は **後者を採用**: BT 周りの全ての操作 (`firstBtCommDevice` / `setCommunicationDevice` / `clearCommunicationDevice`) を `runCatching` で囲い、`SecurityException` が来ても false 戻しで PHONE_FALLBACK に倒す。
+
+##### 3.4.3.3 既知の race timing 制限 (P2-6)
+
+`AudioManager.setCommunicationDevice` は **即時 boolean を返すが、BT SCO の実際のリンク確立は非同期** (~数百 ms)。短時間で `routeToGlassMic → restore` を連打すると、`clearCommunicationDevice` がリンク確立前に呼ばれ no-op になりうる。本実装では **`InputController` が transcription 起動から少なくとも数百 ms は録音を続ける契約** に依存して race を回避している。厳密に同期したい場合は `addOnCommunicationDeviceChangedListener` で gating する (将来検討項目)。
+
+##### 3.4.3.4 `AudioManagerLike` 抽象化 (#183)
+
+Phase 5 で `AudioManagerLike` interface を introduce し、production は `AndroidAudioManagerLike.fromContext(...)`、test は fake AudioManager で BT 不在ケース / route 失敗ケース / SecurityException ケースの 3 fallback path を unit test で押さえる。`BtAudioRouter internal constructor(am: AudioManagerLike?)` が seam。
 
 ### 3.5 UI 層
 
