@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# claude-mobile-hud — dispatcher CLI
-#
-# subcommands:
-#   hub / pair / run / resume / list-sessions / rotate-token / help
+# claude-mobile-hud — dispatcher CLI (docs/03 §9.3)
+# subcommands: hub / pair / run / resume / list-sessions / rotate-token / help
 
 set -euo pipefail
 
@@ -12,9 +10,7 @@ shift || true
 
 case "$CMD" in
     hub)
-        # Hub daemon を起動。`hub/package.json` の `start` script (`tsx --env-file-if-exists=.env
-        # src/index.ts`) を foreground で exec する。--env-file-if-exists により hub/.env が
-        # 無いリポジトリ初期セットアップ時でもエラーにならず default で起動できる。
+        # docs/03 §9.3.1: `npm --prefix hub start` を foreground exec。
         if [[ ! -d "$ROOT/hub/node_modules" ]]; then
             echo "hub/node_modules not found. Run 'npm --prefix hub ci' first." >&2
             exit 1
@@ -22,9 +18,7 @@ case "$CMD" in
         exec npm --prefix "$ROOT/hub" start --silent -- "$@"
         ;;
     pair)
-        # Phone とのペアリング QR を表示。`pair lan` = LAN 経由 (host IPv4 を auto-detect)、
-        # `pair ts` = Tailscale 経由 (`ts.net` の 100.x address)。引数なしは `lan` 既定。
-        # 実装は hub/src/pair.ts (Phase 3 §5)。
+        # docs/03 §5.5 / §9.3.1: hub の pair:<mode> script を exec。
         MODE="${1:-lan}"
         shift || true
         case "$MODE" in
@@ -41,18 +35,9 @@ case "$CMD" in
         exec npm --prefix "$ROOT/hub" run --silent "pair:$MODE" -- "$@"
         ;;
     run)
-        # Claude Code セッションを起動 (safe / yolo モード)。
-        #
-        # - cwd は呼び出し元のものをそのまま継承する (history slug が一致するよう、
-        #   $ROOT に cd しない)。
-        # - `.mcp.runtime.json` を bridge/ 配下に動的生成して `--mcp-config` で渡す。
-        #   user-scope (`~/.claude.json`) の MCP entry には依存しない独立構成。
-        # - `--dangerously-load-development-channels server:channel` で Bridge が emit する
-        #   `notifications/claude/channel*` を claude に届ける gate を開ける
-        #   (Claude 2.x でも flag は受理される、`--help` から隠れただけ)。
-        # - `--session-id <uuid>` で claude の履歴 slug を確定する。Bridge には別途
-        #   `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID` で同じ UUID を inject する
-        #   (wrapper が session_id の single source of truth — AD-12)。
+        # docs/03 §9.3.2: AD-12 single source of truth。uuidgen の 1 uuid を
+        # claude `--session-id` と Bridge `env.BRIDGE_SESSION_ID` の双方に inject。
+        # cwd は呼び出し元のまま継承 (history slug 一致のため $ROOT に cd しない)。
         MODE="${1:-}"
         shift || true
         usage_run() {
@@ -65,10 +50,7 @@ USAGE
         }
         case "$MODE" in safe|yolo) ;; *) usage_run ;; esac
 
-        # P2-1 of review: 後段の `nc -z ... 2>/dev/null` は `nc: command not found` を握りつぶす
-        # ので、nc が無い PC で「Hub not running」という誤メッセージが出てしまう。必須コマンドを
-        # 先に明示 verify して actionable なエラーにする。Ubuntu では全て default で入るので
-        # 通常 silent path。
+        # docs/03 §9.3.4: nc 不在環境で "Hub not running" 誤メッセージを避けるため前段 verify。
         for bin in nc uuidgen claude node; do
             command -v "$bin" >/dev/null 2>&1 || {
                 echo "missing required command: $bin (install it or check PATH)" >&2
@@ -93,17 +75,8 @@ USAGE
             exit 1
         fi
         MCP_CONFIG_FILE="$BRIDGE_DIR/.mcp.runtime.json"
-        # 動的生成: server 名 = `channel` (`--dangerously-load-development-channels server:channel`
-        # と一致させる)。`npx -y` 不要 (bridge に tsx 同梱)。
-        # - `"type": "stdio"`: Claude Code 2.x は省略時の type 推測が不安定なので明示。
-        # - `env.BRIDGE_SESSION_ID`: wrapper の UUID を Bridge に直接渡す (AD-12 の single source
-        #   of truth)。Bridge は /proc を歩かず env を読むだけで session_id を得る。claude には
-        #   `--session-id $SESSION_ID` で同じ値を渡すので、claude の履歴 slug と Hub の register
-        #   が完全に一致する。
-        #
-        # P1-1 of review: heredoc に変数を直接埋め込むと $TSX_BIN/$BRIDGE_ENTRY のパスに `"` や
-        # `\` が含まれた瞬間 JSON が壊れる (現状は固定パスで実害無いが防御コード)。`node -e` で
-        # JSON.stringify を経由させ、JSON エスケープを処理系に任せる。
+        # docs/03 §9.3.3: heredoc 直書きは TSX_BIN/BRIDGE_ENTRY のパスの " / \ で JSON が壊れるため
+        # node -e JSON.stringify で escape を処理系に任せる (P1-1)。
         node -e 'const fs=require("node:fs");fs.writeFileSync(process.argv[1],JSON.stringify({mcpServers:{channel:{type:"stdio",command:process.argv[2],args:[process.argv[3]],env:{BRIDGE_SESSION_ID:process.argv[4]}}}}))' \
             "$MCP_CONFIG_FILE" "$TSX_BIN" "$BRIDGE_ENTRY" "$SESSION_ID"
 
@@ -112,6 +85,8 @@ USAGE
             EXTRA_FLAGS+=("--dangerously-skip-permissions")
         fi
 
+        # docs/03 §9.3.2: `--dangerously-load-development-channels server:channel` は Bridge の
+        # notifications/claude/channel* を claude に届ける gate (2.x で hidden 化、flag は受理)。
         exec claude \
             --mcp-config "$MCP_CONFIG_FILE" \
             --session-id "$SESSION_ID" \
@@ -120,8 +95,7 @@ USAGE
             "$@"
         ;;
     list-sessions)
-        # cwd-scoped session listing。`~/.claude/projects/<encoded-cwd>/*.jsonl` を
-        # 列挙する。encoding は cwd の `/` を `-` に置換した形 (claude のローカル規約)。
+        # docs/03 §9.3.6: cwd encoding `/` → `-` で `~/.claude/projects/<encoded>/*.jsonl` を列挙。
         CWD="$(pwd)"
         ENCODED="${CWD//\//-}"
         DIR="${HOME}/.claude/projects/${ENCODED}"
@@ -130,14 +104,12 @@ USAGE
             echo "  (expected dir: $DIR)" >&2
             exit 1
         fi
-        # 最終更新時刻 (mtime) 降順 + uuid + サイズ + 1 行目テキスト先頭 60 文字を表示。
         shopt -s nullglob
         SESSIONS=("$DIR"/*.jsonl)
         if [[ ${#SESSIONS[@]} -eq 0 ]]; then
             echo "no claude sessions for $CWD" >&2
             exit 1
         fi
-        # mtime 降順に並べ、列構成: "MM-DD HH:MM  <size> <uuid>  <first-line preview>"
         for f in "${SESSIONS[@]}"; do
             mtime=$(stat -c '%Y' "$f")
             printf '%s\t%s\n' "$mtime" "$f"
@@ -145,15 +117,14 @@ USAGE
             uuid="$(basename "$f" .jsonl)"
             size="$(stat -c '%s' "$f")"
             ts="$(date -d "@$mtime" '+%m-%d %H:%M')"
-            # 1 行目 JSONL から user 入力の先頭を抜く (best effort、failure 時は省略)。
+            # best-effort preview (失敗時は空)。
             preview="$(head -1 "$f" 2>/dev/null \
                 | node -e 'try{const o=JSON.parse(require("fs").readFileSync(0,"utf8"));process.stdout.write((o.message?.content?.[0]?.text || o.content || o.text || "").toString().replace(/\s+/g," ").slice(0,60));}catch(e){}' 2>/dev/null || true)"
             printf '%s  %8s  %s  %s\n' "$ts" "$size" "$uuid" "$preview"
         done
         ;;
     resume)
-        # cwd-scoped resume picker。list-sessions を fzf 風に出して 1 件選び、その
-        # session_id を `run safe` 経路に流して `claude --resume <uuid>` で起動する。
+        # docs/03 §9.3.5: `run safe` と同 wiring で uuid 再使用 + claude `--resume`。
         CWD="$(pwd)"
         ENCODED="${CWD//\//-}"
         DIR="${HOME}/.claude/projects/${ENCODED}"
@@ -186,8 +157,6 @@ USAGE
         fi
         target="$(basename "${SESSIONS[$((choice - 1))]}" .jsonl)"
         echo "[resume] $target" >&2
-        # `run safe` と同じ wiring。ただし新規 session_id 生成ではなく既存 uuid を渡し、
-        # claude には `--resume <uuid>` も付ける。`--session-id` は同じ uuid を再使用。
         BRIDGE_DIR="$ROOT/bridge"
         TSX_BIN="$BRIDGE_DIR/node_modules/.bin/tsx"
         BRIDGE_ENTRY="$BRIDGE_DIR/src/index.ts"
@@ -207,9 +176,7 @@ USAGE
             "$@"
         ;;
     rotate-token)
-        # Phase 3 AD-07: hub/.env の HUB_TOKEN を新規 32 hex 文字に書き換える。
-        # Hub の自動再起動はしない (現実行中 session を巻き込むため)、書き換え後に
-        # ユーザが手動で Hub を restart するワークフロー。
+        # docs/03 §9.3.7: hub/.env in-place 書き換え、Hub 自動 restart はしない。
         ENV_FILE="$ROOT/hub/.env"
         if [[ ! -f "$ENV_FILE" ]]; then
             echo "hub/.env not found at $ENV_FILE" >&2
@@ -221,16 +188,14 @@ USAGE
             exit 1
         fi
         NEW_TOKEN="$(openssl rand -hex 16)"
-        # in-place 編集。`HUB_TOKEN=*` の行を新値で置換、無ければ末尾追加。
         if grep -qE '^HUB_TOKEN=' "$ENV_FILE"; then
-            # sed -i with portable BRE; `&` の置換問題を避けるため delimiter を `|` に。
+            # docs/03 §9.3.7: delimiter `|` で新 token 中の `&` 置換破綻を回避。
             sed -i "s|^HUB_TOKEN=.*|HUB_TOKEN=$NEW_TOKEN|" "$ENV_FILE"
         else
             printf '\nHUB_TOKEN=%s\n' "$NEW_TOKEN" >> "$ENV_FILE"
         fi
         echo "[rotate-token] HUB_TOKEN updated in $ENV_FILE" >&2
         echo "  new value: $NEW_TOKEN" >&2
-        # Hub プロセス検出 (kill しないが、ユーザに restart を促す)。
         if pgrep -f "hub/src/index.ts" >/dev/null 2>&1 \
            || pgrep -f "hub.*src/index.ts" >/dev/null 2>&1; then
             echo "  Hub is running. Restart it for the new token to take effect." >&2

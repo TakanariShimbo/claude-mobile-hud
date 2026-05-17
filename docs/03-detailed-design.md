@@ -3040,6 +3040,66 @@ export type PhoneSseEvent =
     | SessionActiveSse | SessionInactiveSse;
 ```
 
+### 5.5 ペアリング QR (`hub/src/pair.ts`)
+
+`npm run pair lan|ts` (= dispatcher `claude-mobile-hud pair`) で実行する CLI。host
+の IPv4 と Hub token から payload を作って `qrcode-terminal` で QR を描画する。
+Phone 側 `SettingsDialog` の「QR スキャン」が読み取って自動入力する経路 (§3.2.5
+Pairing と対をなす)。
+
+#### 5.5.1 named export を vitest で固定する (P2-A/B)
+
+`buildPayload` / `pickAddress` / `score` を **named export** にし、`hub/test/pair.test.ts`
+からゴールデン検証する。理由は wire shape の drift を CI で機械検出することで、
+Phone `Pairing.QrPayload` (`{v:1, baseUrl, token}`) と Hub `buildPayload` が片方だけ
+変わった瞬間にテストが落ちる構造を作る (§3.2.6.2 と対称)。`main()` 側は I/O だけ
+に絞り、純粋な変換は全て export 済の関数に集約する。
+
+#### 5.5.2 NIC scoring と `HUB_PAIR_HOST` 脱出口 (P2-F)
+
+`score(name, addr, mode)` は host の複数 NIC から「Phone が一番繋がりやすい」候補
+を選ぶための重み付け:
+
+| NIC pattern | score | 補足 |
+|---|---|---|
+| `tailscale*` / `100.x.x.x` | 100 | mode=ts のときのみ accept |
+| `wl*` / `wlan*` (wireless) | 50 | mode=lan |
+| `en*` / `eth*` (wired) | 30 | mode=lan |
+| `virbr*` / `docker*` | -20 | 仮想 bridge → 除外寄り |
+| その他 | 0 | tie-break で残る |
+
+mode が lan のときに tailscale を score `null` にし (= 候補から除外)、mode が ts の
+ときに非 tailscale を `null` にする (= 排他 filter)。
+
+**`en*` prefix の wide-net**: Linux の `enp` / `eno` / `ens` / `enx` (USB tether) も
+全部拾うため、複数 IPv4 を持つ host では `en*` 同点の中から先頭が選ばれて Phone から
+到達できない address が当たることがある。実害時に手で外せる脱出口として
+`HUB_PAIR_HOST` env を `pickAddress` の最優先 short-circuit にしている (= NIC 自動
+判定をすべて bypass)。env が空文字のときは通常経路に落ちる。
+
+#### 5.5.3 `buildPayload` の wire 契約
+
+payload は `JSON.stringify({ v:1, baseUrl, token })`。**key 名 / version / 順序** が
+Phone 側 `Pairing.QrPayload` (`@SerialName` 明示、§3.2.6.2) と文字レベルで一致する
+必要がある。`pair.test.ts` の `'{"v":1,"baseUrl":"<url>","token":"<tok>"}'` 完全一致
+スナップショットでこれを 1 箇所にロック (key 順は V8 の object literal property order
+で保証される)。
+
+#### 5.5.4 token 表示の mask vs QR 画像の漏れ (P3-C)
+
+terminal 表示の `token: xxxx...yyyy (N chars)` は録画/スクショ対策の **mask**。
+ただし **QR 画像自体には full token が乗っている**ため、画面をカメラ撮影 / 録画
+されると token は漏れる (録画から QR を抽出可能)。mask は「QR を撮らない録画」での
+緩和でしかなく、defense-in-depth ではない点を明示しておく。token rotation
+(`claude-mobile-hud rotate-token`) はこの前提で運用する。
+
+#### 5.5.5 `isDirectExec` で CLI と vitest import を両立
+
+`import.meta.url === \`file://${process.argv[1]}\`` で「直接 `tsx src/pair.ts` で
+起動された場合のみ `main()` を呼ぶ」guard を入れる。vitest から `import { score }
+from "../src/pair.js"` で取り込んだときに `process.argv[2]` 不在で `main()` が
+USAGE を吐いて `process.exit(1)` するのを避ける目的。
+
 ---
 
 ## 6. Bridge 詳細設計 (TypeScript)
@@ -3153,7 +3213,63 @@ wrapper はその後 `exec claude --mcp-config <生成 path> --session-id <uuid>
 
 #### 6.2.4 `ImageStaging`
 
-Phone から base64 画像を受け取ったら `~/.claude/channels/mobile-hud/inbox/<uuid>.jpg` に書き出し、Claude に `meta.image_path` で渡す (Bridge 終了で削除)。
+Phone から base64 画像を受け取ったら local file に書き出し、Claude に `meta.image_path`
+で渡す (FR-PH-64 / AD-09)。`save()` は staged file の絶対パスを返し、複数 Bridge プロセス
+が同居しても安全な per-pid inbox 設計にする。
+
+##### 6.2.4.1 per-pid inbox レイアウト
+
+inbox の default path は `~/.claude/channels/mobile-hud/inbox/<pid>/` (`ImageStaging.
+defaultPath()`)。`<pid>` 層を 1 段挟む理由:
+
+- 同一 user で複数 `claude-mobile-hud run` を並列に起動した場合 (現行は単一 session 前提
+  だが、defense in depth)、各 Bridge が独立した directory に書き出すので uuid 衝突や
+  cleanup の race が無くなる
+- Bridge 終了時の cleanup は **自 pid の inbox を丸ごと rm** で済む (個別 file 削除
+  リストを持たない)
+
+##### 6.2.4.2 起動時 orphan inbox の GC (P2-7)
+
+`prepare()` で自 inbox を mkdir した直後に、`<inboxRoot>/` 直下を 1 回だけ readdir し、
+`<pid>` 命名のうち生きていない pid の directory を `rm -rf` する。kill -9 や crash で
+通常 cleanup を逃した残骸 (古い session の画像) を毎起動で回収する目的。
+
+- 自分の pid と一致する name は skip
+- 整数 parse できない / 数字に再正規化したら形が変わる name (`String(parseInt(name))
+  !== name`) は **触らない** (typo や手動配置 directory を誤消去しないため)
+- 個々の rm 失敗は warn ログのみで継続 (1 件失敗で他の cleanup が止まらない)
+
+##### 6.2.4.3 MIME → 拡張子 whitelist (AD-09)
+
+| MIME | 拡張子 |
+|---|---|
+| `image/jpeg` | `jpg` |
+| `image/png` | `png` |
+| `image/webp` | `webp` |
+| `image/gif` | `gif` |
+
+IANA 公式 4 種に限定。これ以外 (`image/heic` 等) は `isSupportedMime` で false を返し、
+`save()` が `unsupported mime` で throw する。Phone 側 ImageProcessor が JPEG/PNG/WEBP に
+正規化済 (§3.2.7) なので通常は通る。
+
+##### 6.2.4.4 `defaultIsPidAlive` の EPERM 扱い
+
+`process.kill(pid, 0)` は signal 0 = 「実際に送らず存在/権限のみ check」。例外コード
+の意味が複数あり、誤判定を避けるために以下にまとめる:
+
+- 例外なし → pid 存在、生きている → `true`
+- `ESRCH` → pid 不在 → `false`
+- `EPERM` → pid 存在するが kill 権限なし (= 別 user で起動された Bridge 等) → `true`
+
+`EPERM` を `true` 扱いにする理由は、「存在するが触れない」 inbox を消すと別 user が
+書き込み中の file を踏むため。orphan GC は同 user の dead pid のみを掃除する。
+
+##### 6.2.4.5 `isPidAlive` は test seam
+
+`ImageStagingOptions.isPidAlive` で生存判定を差し替え可能にする。`bridge/test/unit.test.ts`
+で「人工的に dead pid directory を作って GC が消すか」を deterministic に検証するため
+(実プロセスを fork して `kill -9` する代わり)。default 実装 (`defaultIsPidAlive`) は
+省略時のみ自動採用。
 
 ### 6.3 Bridge 終了時の挙動
 
@@ -3346,6 +3462,101 @@ include(":protocol", ":phone", ":glass")
 - `phone` / `glass` は Android application、`implementation(project(":protocol"))` で参照
 - Hub / Bridge は Gradle 管理外 (独立 npm project)
 - CXR-L 用 cxrglobal は git submodule として `glass/cxrglobal/` 配下に置く
+
+### 9.3 dispatcher wrapper (`claude-mobile-hud`)
+
+repo 直下の bash dispatcher。Hub / pair / run / resume / list-sessions /
+rotate-token を 1 つの CLI entry に集約する。`set -euo pipefail` で fail-fast。
+
+#### 9.3.1 サブコマンド一覧と委譲先
+
+| サブコマンド | 委譲 / 役割 |
+|---|---|
+| `hub` | `npm --prefix hub start` を exec (foreground Hub daemon) |
+| `pair lan\|ts` | `npm --prefix hub run pair:<mode>` を exec (§5.5) |
+| `run safe\|yolo` | `.mcp.runtime.json` 動的生成 + `exec claude --mcp-config ...` (AD-12) |
+| `resume` | cwd 配下の `*.jsonl` から interactive 選択 → `run safe` と同じ wiring + `--resume` |
+| `list-sessions` | cwd-encoded directory を `~/.claude/projects/<encoded>` で参照 |
+| `rotate-token` | `hub/.env` の `HUB_TOKEN` を `openssl rand -hex 16` で再生成 (in-place, Hub 自動 restart しない) |
+| `help` / `*` | usage / unknown command |
+
+`hub` / `pair` は前段で `hub/node_modules` の存在を check し、未インストール時に
+actionable な error (`npm --prefix hub ci`) を吐く。
+
+#### 9.3.2 `run` の wiring (AD-12 single source of truth)
+
+session_id は wrapper が `uuidgen` で 1 つ生成し、**同じ UUID を 2 方向に push** する
+(§6.2.3 env injection と対):
+
+1. `claude --session-id <uuid>` で claude の履歴 slug を確定する
+   (`~/.claude/projects/<slug>/<uuid>.jsonl`)
+2. `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID=<uuid>` で Bridge に inject
+
+これにより Bridge が `/proc` を歩かず env を読むだけで session_id が確定する。
+
+**`--dangerously-load-development-channels server:channel`** は Bridge が emit する
+`notifications/claude/channel*` を claude に届ける gate flag。Claude Code 2.x で
+`--help` から hidden になったが flag 自体は受理される。`server:` の後ろの `channel`
+は `.mcp.runtime.json` の `mcpServers.channel` と一致させる契約。
+
+`yolo` モードは `--dangerously-skip-permissions` を追加で渡す (= Permission Relay 経由
+を無効化)。`safe` モードは何も追加しない (= Bridge が permission elicitInput を Hub に
+転送する経路、§3.2.1.2)。
+
+#### 9.3.3 `.mcp.runtime.json` の動的生成 (P1-1)
+
+`--mcp-config` で渡す MCP 設定を毎回 wrapper が生成する。user-scope (`~/.claude.json`)
+の MCP entry には依存しない self-contained 構成にする狙い (= user の global config を
+汚さない、bridge に tsx 同梱なので `npx -y` 不要)。
+
+heredoc に `$TSX_BIN` / `$BRIDGE_ENTRY` を直接埋め込むと、これらのパスに `"` / `\`
+が混じった瞬間 JSON が壊れる (現状は固定パスで実害無いが防御コード)。`node -e
+'fs.writeFileSync(... JSON.stringify({...}))'` で escape を Node の JSON 処理系に任せる
+方式を取る。
+
+```json
+{"mcpServers":{"channel":{"type":"stdio","command":"<tsx>","args":["<entry>"],"env":{"BRIDGE_SESSION_ID":"<uuid>"}}}}
+```
+
+- `"type": "stdio"`: Claude Code 2.x は省略時の type 推測が不安定なので明示
+- runtime 生成 path は `bridge/.mcp.runtime.json`。並列 `run` は未サポート (上書き
+  race、§6.2.3 scope 外)
+
+#### 9.3.4 必須コマンドの前段 verify (P2-1)
+
+`run` / `resume` で Hub 起動 check に `nc -z -w 1 127.0.0.1 $HUB_BRIDGE_PORT
+2>/dev/null` を使うが、`nc` 不在環境では `command not found` を `2>/dev/null` が握り
+潰し、後段が「Hub not running」という misleading なメッセージを吐く。これを防ぐため
+`for bin in nc uuidgen claude node` を先に `command -v` で verify し、不足を
+actionable な error (`install it or check PATH`) として吐く。Ubuntu では default で
+全て入るので通常は silent path。
+
+#### 9.3.5 `resume` の差分
+
+`run safe` と同じ wiring (`.mcp.runtime.json` + `exec claude`) を共有するが:
+
+- session_id を新規生成せず、cwd 配下の既存 `*.jsonl` から interactive 選択した uuid を
+  再使用
+- `--session-id $target` に加えて `--resume $target` を渡す (claude の resume path)
+- file リストは `ls -1t` で mtime 降順、UI は `[N] MM-DD HH:MM uuid` を stderr、
+  prompt が `Pick [1-M] (default 1):` (空入力で先頭を選択)
+
+#### 9.3.6 `list-sessions` の cwd encoding
+
+claude のローカル規約に従い、cwd の `/` を `-` に置換した文字列 を `~/.claude/projects/`
+配下の directory 名として参照する (`${CWD//\//-}`)。directory 不在時は `(expected
+dir: ...)` を併記して原因がわかる error を吐く。出力 1 行 = `MM-DD HH:MM  size  uuid
+preview` (preview は jsonl 1 行目から `message.content[0].text || content || text` を
+60 文字に切る best-effort)。
+
+#### 9.3.7 `rotate-token` の non-destructive 運用
+
+- `hub/.env` を sed in-place で書き換える (`HUB_TOKEN=...` 行のみ、行が無ければ末尾
+  追加)
+- sed delimiter は `|` (新 token に `&` が含まれる場合の置換破綻を回避)
+- **Hub プロセスを自動 restart しない**: 現実行中の session を巻き込まないため。
+  代わりに `pgrep -f hub/src/index.ts` で Hub 動作中なら user に restart を促すメッセージ
+- Phone Settings の token も再 pair が必要、と stderr で明示する
 
 ---
 

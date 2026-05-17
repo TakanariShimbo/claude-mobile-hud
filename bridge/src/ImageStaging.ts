@@ -1,9 +1,5 @@
-// Phone 由来の base64 画像をローカルファイルに staging。
-// Phase 3 §6.2.4 / FR-PH-64 / AD-09。
-//
-// Bridge プロセスごとに専用 inbox (`<inboxRoot>/<pid>/`) を持ち、Bridge 終了時に
-// 自プロセスの inbox を削除する。起動時には親 inboxRoot を走査して、生きていない
-// pid のサブディレクトリも掃除する (kill -9 / クラッシュで cleanup を逃した残骸対策)。
+// docs/03 §6.2.4: Phone base64 画像 → per-pid inbox (`~/.claude/channels/mobile-hud/inbox/<pid>/`)
+// → Claude へ meta.image_path で渡す。FR-PH-64 / AD-09。
 
 import { mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -11,7 +7,7 @@ import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "./log/StructuredLog.js";
 
-/** 受理する MIME → 拡張子。AD-09。IANA 公式の MIME のみ。 */
+/** docs/03 §6.2.4.3: IANA 公式 4 種に限定。 */
 const MIME_TO_EXT: Record<string, string> = {
     "image/jpeg": "jpg",
     "image/png": "png",
@@ -24,7 +20,7 @@ export function isSupportedMime(mime: string): boolean {
 }
 
 export interface ImageStagingOptions {
-    /** pid 生存判定を差し替えるための seam (テスト用)。 */
+    /** docs/03 §6.2.4.5: 生存判定 test seam。 */
     isPidAlive?: (pid: number) => boolean;
 }
 
@@ -40,7 +36,6 @@ export class ImageStaging {
         this.isPidAlive = options.isPidAlive ?? defaultIsPidAlive;
     }
 
-    /** Bridge default の inbox: `~/.claude/channels/mobile-hud/inbox/<pid>/` */
     static defaultPath(pid: number = process.pid): string {
         return join(homedir(), ".claude", "channels", "mobile-hud", "inbox", String(pid));
     }
@@ -50,15 +45,11 @@ export class ImageStaging {
         await mkdir(this.inboxDir, { recursive: true });
         this.prepared = true;
         this.logger.info("inbox_ready", { dir: this.inboxDir });
-        // 親 inboxRoot を走査して、生きていない pid の inbox を掃除 (P2-7)。
-        // 失敗してもログのみで継続。
+        // docs/03 §6.2.4.2: 起動時 1 回だけ親 inboxRoot を走査して dead pid を掃除 (P2-7)。
         await this.gcOrphanInboxes();
     }
 
-    /**
-     * base64 を decode してファイルに書き出し、絶対パスを返す。
-     * @throws {Error} 未対応 MIME or 書き込み失敗
-     */
+    /** @throws {Error} 未対応 MIME or 書き込み失敗 */
     async save(base64: string, mime: string): Promise<string> {
         if (!isSupportedMime(mime)) {
             throw new Error(`unsupported mime: ${mime}`);
@@ -71,7 +62,6 @@ export class ImageStaging {
         return path;
     }
 
-    /** Bridge 終了時に自 pid の inbox を削除。失敗は warn ログのみ。 */
     async cleanup(): Promise<void> {
         try {
             await rm(this.inboxDir, { recursive: true, force: true });
@@ -84,10 +74,6 @@ export class ImageStaging {
         }
     }
 
-    /**
-     * `<inboxRoot>/` の直下を走査して、`<pid>` ディレクトリのうち生きていない pid を rm。
-     * 自分の pid と数字でないディレクトリ名はスキップする。失敗時は warn ログ。
-     */
     private async gcOrphanInboxes(): Promise<void> {
         const root = dirname(this.inboxDir);
         const selfDirName = this.inboxDir.split("/").pop() ?? "";
@@ -105,10 +91,8 @@ export class ImageStaging {
         for (const name of entries) {
             if (name === selfDirName) continue;
             const pid = Number.parseInt(name, 10);
-            if (!Number.isInteger(pid) || pid <= 0 || String(pid) !== name) {
-                // 数字でない / 整数化で形が変わるディレクトリは触らない
-                continue;
-            }
+            // docs/03 §6.2.4.2: 数字 round-trip しない name は誤消去防止で skip。
+            if (!Number.isInteger(pid) || pid <= 0 || String(pid) !== name) continue;
             if (this.isPidAlive(pid)) continue;
             const path = join(root, name);
             try {
@@ -130,10 +114,9 @@ export class ImageStaging {
     }
 }
 
+// docs/03 §6.2.4.4: signal 0 = 存在/権限 check のみ。EPERM は「存在するが触れない」= true。
 function defaultIsPidAlive(pid: number): boolean {
     try {
-        // signal 0 は実際に送らず、permission/存在チェックのみ。
-        // 存在しない pid → ESRCH throw、権限不足 → EPERM (= 存在はする) なので true 扱い。
         process.kill(pid, 0);
         return true;
     } catch (err) {
