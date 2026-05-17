@@ -34,8 +34,8 @@ import kotlinx.coroutines.launch
  *
  * ジェスチャは現在モードに応じて分岐し、必要な「決定」だけを wire で phone に送る。
  *
- * 4-5b: POC は `GlassBridge.currentMode` / `pendingPermission` という 2 つの独立 StateFlow を
- * 受けていたが、新 wire (`CurrentState` 単発 event) で原子的に合わさる `PhoneState` に集約。
+ * 4-5b: mode / pending を別々の StateFlow にすると 1 描画フレーム内に乖離する hazard が
+ * あるため、`CurrentState` 単発 event で原子的に合わさる `PhoneState` 1 つに集約 (AD-03)。
  *
  * Compose 非依存。Composable から remember で 1 インスタンス保持し:
  *   - [state] を collectAsStateWithLifecycle で観測

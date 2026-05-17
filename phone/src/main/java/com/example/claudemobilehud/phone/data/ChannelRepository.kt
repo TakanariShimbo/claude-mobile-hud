@@ -89,11 +89,11 @@ class ChannelRepository(
     val pendingPermissions: StateFlow<List<PendingPermission>> get() = _pendingPermissions.asStateFlow()
 
     /**
-     * session 単位の「送信確認モード」フラグ (POC port)。Glass の TAP (Listening 停止)
-     * で当該 session を true、SWIPE_FORWARD/SWIPE_BACK (送信/取消) もしくは send 成功で
-     * false に倒す。session を跨いでも保持されるので、別 session で作業して戻ってきた
-     * 際に未確定の Confirming 状態が復元される。優先順位は LISTENING > PERMISSION_CONFIRMING
-     * > CONFIRMING > IDLE (POC と同じ — 録音中は permission/confirming で上書きしない)。
+     * session 単位の「送信確認モード」フラグ。Glass の TAP (Listening 停止) で当該 session
+     * を true、SWIPE_FORWARD/SWIPE_BACK (送信/取消) もしくは send 成功で false に倒す。
+     * session を跨いでも保持されるので、別 session で作業して戻ってきた際に未確定の
+     * Confirming 状態が復元される。優先順位は LISTENING > PERMISSION_CONFIRMING > CONFIRMING
+     * > IDLE (録音中はユーザの発話を最優先するため、permission/confirming で上書きしない)。
      */
     private val _confirmingBySession = MutableStateFlow<Map<String, Boolean>>(emptyMap())
 
@@ -149,10 +149,10 @@ class ChannelRepository(
 
         // 単一 source: currentStateDraft の合成。Phone UI と Glass wire の両方の親。
         // 4b2 で transcription state / micSource を InputController 由来に切替え。
-        // POC 移植: `_confirmingBySession` も入力に加えるが、`combine` 5 引数 lambda の
-        // 限界を超えるので「入力 (transcription/inputText/micSource) と外部 state (session/
-        // pending/confirming) の 2 つの combine を nested に重ねる」形にする。型安全 + 既存
-        // 構造との整合性のため、Pair / data class は導入しない。
+        // `_confirmingBySession` も入力に加えるが、`combine` 5 引数 lambda の限界を
+        // 超えるので「入力 (transcription/inputText/micSource) と外部 state (session/
+        // pending/confirming) の 2 つの combine を nested に重ねる」形にする。型安全 +
+        // 既存構造との整合性のため、Pair / data class は導入しない。
         scope.launch {
             val inputs = combine(
                 input.text,
@@ -250,7 +250,7 @@ class ChannelRepository(
     suspend fun deleteSession(sessionId: String) = sessionStore.deleteSession(sessionId)
 
     /**
-     * 指定 session の「送信確認モード」flag を更新 (POC port)。
+     * 指定 session の「送信確認モード」flag を更新。
      * `sessionId == null` のときは current。`GlassEventDispatcher` が gesture handler から呼ぶ:
      *   - Listening → TAP 停止時に `setConfirming(currentSession, true)` → CONFIRMING mode 出現
      *   - SWIPE_FORWARD/BACK で `setConfirming(currentSession, false)` → IDLE / 次 mode へ
@@ -403,11 +403,11 @@ class ChannelRepository(
         }
 
     /**
-     * P1-7 of AC-05: 送信成功時の副作用 3 件を `send()` から抽出。
+     * 送信成功時の副作用 3 件を `send()` から抽出。
      *   - FR-PH-55: pending (UNKNOWN bucket / chatId=null) に chat_id + session_id を貼る。
      *     後続 `SseEvent.Reply` で `SessionStore.mergeUnknownSession` が正規 session
      *     へ移送する材料になる。
-     *   - POC port: confirming flag を畳む (Glass の CONFIRMING UI から抜ける)。
+     *   - confirming flag を畳む (Glass の CONFIRMING UI から抜ける)。
      *     `resp.sessionId` (Hub mint された正規 id) を優先し、null の場合のみ送信時の
      *     snapshot にフォールバック (UNKNOWN bucket → 新規 session mint 経路で、古い
      *     `sessionId == null` キーに confirming が残らないようにする、P2-B of 4d review)。
@@ -497,7 +497,7 @@ class ChannelRepository(
                     if (current.any { it.requestId == event.requestId }) current
                     else current + pending
                 }
-                // POC port: 現在 mode が IDLE のときだけ別 session の permission に auto-switch
+                // 現在 mode が IDLE のときだけ別 session の permission に auto-switch
                 // (ユーザが録音/確認中/別 permission 対応中なら邪魔しない gating)。
                 // sessionId が null (Hub-side で session 未確定) は対象外。
                 event.sessionId?.let { maybeAutoSwitchSession(it) }
@@ -513,7 +513,7 @@ class ChannelRepository(
                 )
             }
             is SseEvent.Reply -> {
-                // POC port: Reply auto-switch も permission と同じ gating。session_id が無い
+                // Reply auto-switch も permission と同じ gating。session_id が無い
                 // (UNKNOWN_SESSION_ID 経路) reply は対象外。
                 event.sessionId?.let { maybeAutoSwitchSession(it) }
                 _events.tryEmit(ChannelEvent.Reply(event.chatId, event.sessionId, event.text))
@@ -523,7 +523,7 @@ class ChannelRepository(
     }
 
     /**
-     * POC port: IDLE のときだけ別 session に切替える。録音中 (LISTENING) / 送信確認中
+     * IDLE のときだけ別 session に切替える。録音中 (LISTENING) / 送信確認中
      * (CONFIRMING) / 権限確認中 (PERMISSION_CONFIRMING) は触らない。同じ session への
      * 切替は noop。
      *
@@ -559,7 +559,7 @@ class ChannelRepository(
     }
 
     /**
-     * Mode の優先順位 (POC と同じ): `LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE`。
+     * Mode の優先順位: `LISTENING > PERMISSION_CONFIRMING > CONFIRMING > IDLE` (docs/03 §3.2.1.2.1)。
      * 録音中はユーザの作業を邪魔しないため permission / confirming で上書きしない設計。
      */
     private fun deriveMode(

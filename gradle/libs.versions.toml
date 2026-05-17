@@ -1,5 +1,4 @@
 # Gradle Version Catalog.
-# Phase 3 §10.2 の方針: POC で動作実績のあるバージョンを継承。
 # Phase 4 着手時に必要なら見直し可。
 
 [versions]

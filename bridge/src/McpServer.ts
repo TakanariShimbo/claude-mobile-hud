@@ -122,7 +122,7 @@ export class McpServer {
                     // `experimental.claude/channel*` は MCP 公式仕様には無い custom capability。
                     // Claude Code 側がこの 2 つを discover した場合に、対応する
                     // `notifications/claude/channel{,/permission,/permission_request,/permission_abort}`
-                    // method を listen / emit してくれる前提。POC v1 から踏襲。
+                    // method を listen / emit してくれる前提。
                     experimental: {
                         "claude/channel": {},
                         "claude/channel/permission": {},

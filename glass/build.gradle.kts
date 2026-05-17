@@ -59,7 +59,7 @@ dependencies {
 
     // 4-5a: Rokid CXR-L の Glass 側バインダ (CXRServiceBridge + Caps)。
     // phone 側は `:cxrglobal:lib` 経由で client-l を使い、こちらは system service
-    // 同梱版に直接バインドする (POC の構成踏襲)。
+    // 同梱版に直接バインドする (Rokid 推奨構成)。
     implementation(libs.rokid.cxr.service.bridge)
 
     implementation(libs.kotlinx.serialization.json)

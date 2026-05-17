@@ -7,7 +7,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import com.example.claudemobilehud.glass.log.StructuredLog
 
 /**
- * グラスの display 電源管理の単一窓口 (Phase 3 §4.5 関連 / POC 踏襲)。
+ * グラスの display 電源管理の単一窓口 (Phase 3 §4.5)。
  *
  * 背景: Rokid YodaOS では `WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON` が CXR-L
  * 経由の reply 受信などをきっかけに事実上無効化されることを確認している。
@@ -49,7 +49,7 @@ object ScreenAwakeManager {
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
                 PowerManager.ACQUIRE_CAUSES_WAKEUP or
                 PowerManager.ON_AFTER_RELEASE,
-            "claude-channel:notif-wake",
+            "claude-mobile-hud:notif-wake",
         ).apply {
             setReferenceCounted(false)
             acquire(NOTIF_WAKE_MS)
@@ -73,7 +73,7 @@ object ScreenAwakeManager {
         val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager
         val wl = pm?.newWakeLock(
             PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ON_AFTER_RELEASE,
-            "claude-channel:keep-on",
+            "claude-mobile-hud:keep-on",
         )?.apply { setReferenceCounted(false) }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {

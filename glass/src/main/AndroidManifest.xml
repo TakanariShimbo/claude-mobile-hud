@@ -4,7 +4,7 @@
 
     <!--
         P1-A of 5a review: ScreenAwakeManager で SCREEN_BRIGHT_WAKE_LOCK を acquire するため
-        必須 (POC 踏襲)。WAKE_LOCK が未宣言だと acquire() が SecurityException で即 crash する。
+        必須。WAKE_LOCK が未宣言だと acquire() が SecurityException で即 crash する。
     -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 

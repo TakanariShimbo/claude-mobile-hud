@@ -17,9 +17,8 @@ import com.example.claudemobilehud.phone.log.StructuredLog
  * Phase 3 §3.3.4 の Mic FGS-microphone。
  *
  * `AppLifecycleController.startGlassSession` 経由でしか起動しない (companion
- * からの直接 start/stop は提供しない)。POC との差分:
- *   - POC は `MicForegroundService.start(context)` を Repository から直接呼んでいた
- *   - Rev 2 では FGS 操作はすべて AppLifecycleController → FgsOperations を経由
+ * からの直接 start/stop は提供しない、FGS 同士の直接結合を避けるため)。
+ * FGS 操作はすべて AppLifecycleController → FgsOperations を経由する。
  *
  * 役割は AudioRecord を OS から確保し続けるために
  * `FOREGROUND_SERVICE_TYPE_MICROPHONE` の通知を立てておくだけ。実際の
@@ -37,7 +36,7 @@ class MicForegroundService : Service() {
         // `startForeground(MICROPHONE)` は SecurityException で死ぬ。事前に GlassDialog
         // で grant を取る運用にしているが、OS triggered restart や mid-session の
         // 権限 revoke 等の edge case で onCreate が走るケースを **defensive に潰す**
-        // (POC `MicForegroundService.start()` companion guard の移植)。
+        // (companion guard と同じ idea を service 起動側に置く)。
         val granted = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECORD_AUDIO,

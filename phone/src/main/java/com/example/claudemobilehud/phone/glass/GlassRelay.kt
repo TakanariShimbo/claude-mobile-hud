@@ -95,7 +95,7 @@ class GlassRelay(
         // FR-GL-20: Glass の session 一覧は **アクティブな session のみ** 表示する。
         // Phone 側 SessionDrawer (`ui.sessions`) は履歴アクセスも兼ねるため
         // inactive を含めて出すが、Glass は「いま操作できる session」だけを示すので
-        // ここで filter する。POC でも Glass 側は active のみだった。
+        // ここで filter する。
         // 注意: `current_session` wire (observeCurrentSession) は filter しないので、
         // current が inactive 化したケースでは「list に居ない session が current」に
         // なり得る。Glass UI 側は indexOfFirst で `-1` ガード済みなのでクラッシュは
@@ -137,7 +137,7 @@ class GlassRelay(
         repository.events.collect { event ->
             when (event) {
                 is ChannelEvent.Reply -> {
-                    // 本文は HUD overlay に乗せない (POC ユーザ要望)。kind + sessionId のみ。
+                    // 本文は HUD overlay に乗せない (ユーザ要望)。kind + sessionId のみ。
                     sendWire(
                         sender,
                         NotificationEvent(

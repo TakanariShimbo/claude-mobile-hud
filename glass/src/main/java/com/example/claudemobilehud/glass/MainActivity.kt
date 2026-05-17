@@ -43,7 +43,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 画面 OFF / ロック状態でも通知受信時にこの Activity を出せるように (POC 踏襲)。
+        // 画面 OFF / ロック状態でも通知受信時にこの Activity を出せるようにする。
         setShowWhenLocked(true)
         setTurnScreenOn(true)
 
@@ -153,7 +153,7 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Rokid 物理リモコンのキーマッピング (POC 踏襲):
+     * Rokid 物理リモコンのキーマッピング:
      *  - ENTER (中央押し)   → Tap
      *  - DPAD_RIGHT        → SwipeForward
      *  - DPAD_LEFT         → SwipeBack

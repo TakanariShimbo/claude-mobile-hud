@@ -32,11 +32,11 @@ import java.util.concurrent.atomic.AtomicInteger
  *   - `start → stop → start` を高速連打した場合の race は [generation] (AtomicInteger) を
  *     bump し、遅延到着した event / frame を生成番号で gating することで防ぐ (P1-4)。
  *
- * pre-buffer 戦略 (§3.2.5 / POC 実証):
+ * pre-buffer 戦略 (§3.2.5):
  *   - WS 接続成功直後の `session.update` ack まで音声を送ると drop されることがある。
  *   - SessionReady を受けるまで MicCapture からのフレームを内部 `ArrayDeque` に貯める。
  *   - **drop policy** は `pollLast` (新しい方を捨てる) — pre-buffer の目的は session 冒頭
- *     の発話を残すこと。POC 旧 `pollFirst` は冒頭を捨てる逆効果だった (P2-3 fix)。
+ *     の発話を残すこと。`pollFirst` だと冒頭を捨てる逆効果になる (P2-3 fix)。
  *   - 上限 250 frame (~10s @ 40ms)。
  *
  * **テスト seam**: `transportFactory` / `micFactory` を差し替えて JVM unit test 可能。
@@ -158,7 +158,7 @@ class TranscriptionClient internal constructor(
     private fun routeFrame(gen: Int, frame: ByteArray) {
         if (gen != generation.get()) return
         // P3-6: java.util.Base64.getEncoder() は RFC4648 (padded) を返す。OpenAI Realtime
-        // API は padded base64 を受け入れる (POC 実証)。android.util.Base64 を使うと
+        // API は padded base64 を受け入れる (実機検証済)。android.util.Base64 を使うと
         // JVM unit test で empty string が返るためデフォルトで避ける。
         val b64 = base64.encodeToString(frame)
         val sendNow = synchronized(bufferLock) {

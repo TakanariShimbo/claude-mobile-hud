@@ -25,7 +25,7 @@ import kotlinx.serialization.json.put
  *
  * 設計判断: `session.created` は接続直後の通知で session.update 反映前のため、
  * これを SessionReady とみなすと音声送信開始のタイミングが早すぎて初回 chunk が
- * drop される (POC で確認済み)。よって除外。
+ * drop される (実機検証で確認済)。よって除外。
  */
 internal object EventCodec {
     private val json = Json {

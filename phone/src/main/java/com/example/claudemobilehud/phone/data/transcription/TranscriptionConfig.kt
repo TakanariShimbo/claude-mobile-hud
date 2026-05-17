@@ -9,7 +9,7 @@ package com.example.claudemobilehud.phone.data.transcription
  * - [sampleRateHz]: 24kHz mono PCM16 を運用上の最適点として固定。Realtime API の
  *   想定 sample rate と一致。
  * - [chunkMs]: WS 1 frame あたりの送出長。40ms = 1920 bytes / chunk。長すぎると
- *   delta latency、短すぎると WS overhead 増。POC で実機検証済みの値。
+ *   delta latency、短すぎると WS overhead 増。実機検証で 40ms が運用上の最適点。
  */
 data class TranscriptionConfig(
     val apiKey: String,

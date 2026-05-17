@@ -96,12 +96,12 @@ class GlassEventDispatcher(
         // P2-A of review: gesture 受信時点の current session を冒頭で snapshot し、
         // `setConfirming(sessionId, ...)` に明示渡しする。`setConfirming(null, ...)` で
         // Repository 内 re-lookup させると、auto-switch / 通知タップ等で session が
-        // 切替わった理論 race を踏むと別 session に flag が立ちうる (POC pattern と同じ防御)。
+        // 切替わった理論 race を踏むと別 session に flag が立ちうるため、明示 snapshot で防ぐ。
         val sessionIdAtGesture = repository.uiState.value.currentSessionId
         when (which) {
             GestureKind.TAP -> {
-                // POC port: Listening → 停止すると同時に当該 session の confirming flag を
-                // 立てる (Idle → 録音開始は flag を触らない)。「was listening」判定は
+                // Listening → 停止すると同時に当該 session の confirming flag を立てる
+                // (Idle → 録音開始は flag を触らない)。「was listening」判定は
                 // toggleTranscription を呼ぶ**前**にしないと、stop 後の state を見て false 判定
                 // になる race を踏む。
                 val wasListening = repository.input.transcription.state.value.let {
@@ -117,14 +117,14 @@ class GlassEventDispatcher(
                 // また handle() は collect の中で suspend で動いており、2 件目の
                 // SWIPE_FORWARD は前の send() suspend が return してから初めて評価
                 // されるため、二重送信は構造的に発生しない。
-                // POC port: 送信確定で confirming flag を畳む (送信成功側でも畳むが、
+                // 送信確定で confirming flag を畳む (送信成功側でも畳むが、
                 // 失敗時に CONFIRMING UI に戻りたいので両側で操作する)。
                 repository.setConfirming(sessionIdAtGesture, false)
                 val snapshot = repository.inputText.value
                 repository.send(snapshot)
             }
             GestureKind.SWIPE_BACK -> {
-                // POC port: 取消 / 入力クリア。confirming も同時に畳む。
+                // 取消 / 入力クリア。confirming も同時に畳む。
                 repository.setConfirming(sessionIdAtGesture, false)
                 repository.clearInput()
             }

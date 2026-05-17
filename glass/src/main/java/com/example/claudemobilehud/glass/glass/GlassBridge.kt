@@ -157,8 +157,8 @@ object GlassBridge {
             subscribe(CHANNEL_FROM_PHONE, object : CXRServiceBridge.MsgCallback {
                 override fun onReceive(name: String?, args: Caps?, bytes: ByteArray?) {
                     // CXRServiceBridge は `bytes` を常に null で呼び、ペイロードは `args`
-                    // (Caps) で渡してくる (実機確認済、POC も args 経由)。`bytes ?: return`
-                    // 経路だと Phone から来る wire event が全部 silent drop される。
+                    // (Caps) で渡してくる (実機確認済)。`bytes ?: return` 経路だと Phone
+                    // から来る wire event が全部 silent drop される。
                     val caps = args ?: return
                     // CXR binder thread から呼ばれる。state 更新は main thread に集約。
                     mainHandler.post { dispatchCaps(caps) }
@@ -335,7 +335,7 @@ object GlassBridge {
             .getOrNull() ?: return
         // P3-C of 5a review: CXRServiceBridge.sendMessage の戻り値は SDK constants:
         //   0 = success, -1 = EINVAL, -2 = EDUP, -3 = EFAULT, -4 = EBUSY
-        // POC 同様 `r != 0` を非 success として一括ログするが、将来 retry ロジックを
+        // 当面は `r != 0` を非 success として一括ログするが、将来 retry ロジックを
         // 入れるならここで分岐するための注記を残す。
         val r = runCatching { b.sendMessage(CHANNEL_TO_PHONE, caps) }
             .onFailure {
@@ -382,7 +382,8 @@ object GlassBridge {
     internal fun atomicityStateForTest(): Pair<Int, Pair<Int, String>?> =
         lastSeenStateSeq to pendingInputText
 
-    // POC との後方互換のため。phone 側 GlassConnectionService の channel 名と一致。
+    // phone 側 GlassConnectionService の channel 名と一致させる必要がある (CXR-L での
+    // subscribe/sendMessage の宛先 key)。
     internal const val CHANNEL_FROM_PHONE = "rk_custom_client"
     internal const val CHANNEL_TO_PHONE = "rk_custom_key"
 }

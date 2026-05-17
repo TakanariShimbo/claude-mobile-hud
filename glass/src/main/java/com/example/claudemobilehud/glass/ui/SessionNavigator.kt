@@ -5,8 +5,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 
 /**
- * 通知や CXR 経由の自動遷移を Compose の NavController に橋渡しする小さな bus
- * (POC 踏襲)。MainActivity (lifecycleScope) から requestConversation() を呼び、
+ * 通知や CXR 経由の自動遷移を Compose の NavController に橋渡しする小さな bus。
+ * MainActivity (lifecycleScope) から requestConversation() を呼び、
  * NavHost を持つ composable が LaunchedEffect で collect して `nav.navigate` する。
  *
  * どの session に行くかは **phone 側 currentSessionId が真実** で、caller は別途

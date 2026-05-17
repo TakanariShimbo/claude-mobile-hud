@@ -148,9 +148,8 @@ class PhoneApplication : Application() {
             // (targetSDK=36 で更に厳格化)。`startForegroundService` を呼んだ後 5s 以内に
             // `startForeground` を呼ばないと ForegroundServiceDidNotStartInTimeException も
             // 飛ぶので、**dispatcher 段階で eligibility を判定** し、不適合なら
-            // `startForegroundService` 自体を呼ばない (POC `MicForegroundService.start()`
-            // companion guard と同じ配置)。`MicForegroundService.onCreate` 側にも同じ guard
-            // を残しているが、そちらは OS triggered restart 等の double-defense。
+            // `startForegroundService` 自体を呼ばない。`MicForegroundService.onCreate` 側に
+            // も同じ guard を置いてあるが、そちらは OS triggered restart 等の double-defense。
             val granted = ContextCompat.checkSelfPermission(
                 context,
                 Manifest.permission.RECORD_AUDIO,

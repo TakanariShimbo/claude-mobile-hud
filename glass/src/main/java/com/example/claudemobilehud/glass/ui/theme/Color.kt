@@ -3,7 +3,7 @@ package com.example.claudemobilehud.glass.ui.theme
 import androidx.compose.ui.graphics.Color
 
 // Rokid Glass は単色緑モノクロ HUD。輝度のみが効くが、ソース側を緑系に揃えると
-// HUD 発色と PC mirror (scrcpy) の見え方のトーンが一致して読みやすい (POC 踏襲)。
+// HUD 発色と PC mirror (scrcpy) の見え方のトーンが一致して読みやすい。
 val GlassBackground = Color.Black
 
 /** 主要 (active) テキスト。HUD では「明るい」緑として描画される。 */

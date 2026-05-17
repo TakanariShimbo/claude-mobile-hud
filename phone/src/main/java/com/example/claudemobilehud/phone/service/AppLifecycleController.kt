@@ -20,8 +20,8 @@ import kotlinx.coroutines.withContext
  * Phase 3 §3.3.1 の FGS state machine。
  *
  * Glass + Mic の 2 FGS を 1 つの論理サブシステムとして扱い、両者の
- * onCreate / onDestroy が揃ったときだけ state を進める。POC の "片方しか
- * 起動してない過渡状態に直結する" 負債を解消する中核 (§3.3.1 表参照)。
+ * onCreate / onDestroy が揃ったときだけ state を進める。"片方しか起動して
+ * いない過渡状態" を許さないことで FGS 間結合と暗黙状態を排除する (§3.3.1 表参照)。
  *
  * - **`object`** は test しづらいため、Phase 4 では `class` + `AppContainer` に
  *   singleton を置く構成にした (設計書の object は意図伝達用 sketch)。

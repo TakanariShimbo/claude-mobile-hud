@@ -25,12 +25,12 @@ import kotlinx.coroutines.launch
  * 役割:
  *   - `ChannelRepository.connectivity` を購読し常駐通知のテキストを更新
  *   - `ChannelRepository.events` を購読し reply / permission 通知を post
- *   - POC との差分: MicForegroundService を直接 start/stop しない
- *     (AppLifecycleController 経由のみ)
+ *   - MicForegroundService を直接 start/stop しない (FGS 同士の結合を避ける、
+ *     AppLifecycleController 経由のみ)
  *
  * `applicationContext` 経由で `PhoneApplication.container` から
  * Repository / Settings を取得。Service プロセスが Application 死亡時に起動する
- * paranoid シナリオは Phase 4 範囲外 (POC でもケアしていない)。
+ * paranoid シナリオは Phase 4 範囲外。
  */
 class ChannelService : Service() {
     private val log = StructuredLog("channel.service")

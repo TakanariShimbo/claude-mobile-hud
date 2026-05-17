@@ -5,9 +5,9 @@
 //   1. claude には `--session-id <uuid>` で渡す (claude 履歴 slug と一致させる)
 //   2. Bridge には `.mcp.runtime.json` の `env.BRIDGE_SESSION_ID` で直接渡す
 // この双方向 inject によって Bridge は env を 1 つ読むだけで claude と同じ session_id を
-// 得られる。POC では bridge 起動時に `/proc/<ppid>/cmdline` を 10 hop 親方向に登って
-// claude 祖先を探していたが、wrapper 側で env templating ができる構成なら不要 (Linux 限定,
-// claude の spawn topology 変更で壊れる brittle さ, etc を全部回避)。
+// 得られる。代替案 (`/proc/<ppid>/cmdline` を 10 hop 親方向に登って claude 祖先を探す
+// process-walk 方式) は Linux 限定 + claude の spawn topology 変更で壊れる brittle さ
+// があるため採らない (docs/03 §6.2.3)。
 //
 // 失敗時は **fail-fast** で throw。random UUID で起動して claude の履歴 file と
 // Hub の session_active が不一致になる AD-12 違反を絶対に許さない。

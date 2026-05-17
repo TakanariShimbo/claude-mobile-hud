@@ -32,7 +32,7 @@ import kotlinx.coroutines.launch
 /**
  * Hub 接続設定 + OpenAI API key の編集 dialog。
  *
- * **4-6 で QR pairing を再実装** (POC からの port):
+ * **QR pairing** (Phase 4-6 で実装):
  *   - 「QR スキャン」ボタンで [QrScanner.scan] を呼び ML Kit Code Scanner を起動。
  *   - 結果を [Pairing.parse] に流して baseUrl / token をフィールドにセット。
  *   - openAiApiKey は QR には乗らない (端末固有 secret なので手入力のまま保持)。

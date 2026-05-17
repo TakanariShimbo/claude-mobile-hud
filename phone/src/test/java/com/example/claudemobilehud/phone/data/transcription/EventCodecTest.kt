@@ -1,4 +1,4 @@
-// EventCodec JSON 往復テスト。OpenAI Realtime API の wire 互換性が要 (POC 知見の蓄積)。
+// EventCodec JSON 往復テスト。OpenAI Realtime API の wire 互換性を保証する。
 
 package com.example.claudemobilehud.phone.data.transcription
 

@@ -6,7 +6,7 @@ import androidx.compose.runtime.Composable
 
 /**
  * Rokid Glass HUD は単色緑モノクロ。Material 3 の dynamicColor は使わず、
- * 全体を緑トーンの ColorScheme に固定する (POC 踏襲)。
+ * 全体を緑トーンの ColorScheme に固定する。
  */
 private val GlassColorScheme = darkColorScheme(
     primary = TextGreen,

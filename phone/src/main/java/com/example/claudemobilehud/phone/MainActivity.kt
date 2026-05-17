@@ -43,9 +43,8 @@ class MainActivity : ComponentActivity() {
     private var pendingSessionId by mutableStateOf<String?>(null)
 
     // POST_NOTIFICATIONS は Android 13+ で runtime permission。未許可だと OS が通知を
-    // silent drop するため、reply/permission 通知が一切 Phone に出ない。POC `MainActivity.
-    // ensureNotificationPermission` の移植。callback は log のみ (拒否時は user が Settings
-    // 経由で許可する想定)。
+    // silent drop するため、reply/permission 通知が一切 Phone に出ない。app 起動時に 1 回
+    // request を出す。callback は log のみ (拒否時は user が Settings 経由で許可する想定)。
     @Suppress("InvalidFragmentVersionForActivityResult")
     private val notificationPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),

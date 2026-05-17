@@ -21,7 +21,7 @@ data class PhoneUiState(
     /** 全 session の outstanding permission (通知シェード等で全件参照したい時用)。 */
     val pendingPermissions: List<PendingPermission> = emptyList(),
     /**
-     * P1-6 of POC TODO (AC-05): 現在 session 宛 pending の filter を Repository に集約。
+     * 現在 session 宛 pending の filter を Repository に集約。
      * UI 側で `pendingPermissions.filter { sessionId == currentSessionId }` を書くと
      * 「UI が状態管理ロジックを持つ」NFR-51 違反になるので、Repository.combine の段階で
      * 計算した結果をここに乗せる。in-app の `PermissionDialog` は本フィールドだけ見る。

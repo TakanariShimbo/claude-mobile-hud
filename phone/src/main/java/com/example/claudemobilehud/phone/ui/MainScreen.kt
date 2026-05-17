@@ -8,9 +8,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 /**
  * Phase 3 §3.5.1 の最上位 composable。
  *
- * POC では 275 行の 1 composable に Scaffold / Dialogs / Effects がすべて入っていた。
- * Rev 2 の AD-18 (Compose recomposition 戦略) で 3 + 1 (state holder) に分解。
- * 各サブ composable は自分が必要とする state だけ受け取り、他フィールド変化で
+ * 巨大 composable は recomposition の粒度を粗くして無関係な state 変更でも再描画
+ * させてしまうため、Rev 2 の AD-18 (Compose recomposition 戦略) で 3 + 1 (state holder)
+ * に分解。各サブ composable は自分が必要とする state だけ受け取り、他フィールド変化で
  * 再描画されない。
  */
 @Composable
