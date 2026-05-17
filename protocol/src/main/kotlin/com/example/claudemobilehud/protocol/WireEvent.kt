@@ -5,10 +5,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 sealed interface WireEvent {
-    /**
-     * Epoch ミリ秒。JS `Number` の安全範囲 (2^53 - 1) は西暦 287396 年まで余裕があるため、
-     * TS 側で `number` として扱って精度欠落しない。
-     */
+    /** docs/03 §2.2.1: epoch ms。Long で JS Number 安全範囲 (2^53-1) に収まる。 */
     val ts: Long
 }
 
@@ -42,10 +39,7 @@ data class SessionList(
     override val ts: Long,
 ) : WireEvent
 
-/**
- * 現在 session の切替。`id == null` は **clear** (現在 session 無し) を意味する。
- * Glass 側受信時は null チェック 1 つで set/clear を分岐できる。
- */
+/** docs/03 §2.2.2: `id == null` = 現在 session 無しの clear セマンティクス。 */
 @Serializable
 @SerialName("current_session")
 data class CurrentSessionEvent(
@@ -78,10 +72,7 @@ data class ErrorEvent(
 ) : WireEvent
 
 // --- Glass→Phone ---
-
-// NOTE: 以下の `ts` のみ持つ data class は同 `ts` だと `equals == true`。
-// 設計上 `ts` は単調増加なので衝突しない前提だが、将来 de-dup を入れる場合は
-// (kind, 受信時刻) で判定し、`equals` には依存しないこと。
+// docs/03 §2.2.3: 以下 `ts` のみ data class は同 ts で equals 衝突する。de-dup 時は (kind, 受信時刻) で判定。
 
 @Serializable
 @SerialName("hello")
@@ -148,10 +139,7 @@ data class SessionSummaryPayload(
 
 @Serializable
 data class ChatMessagePayload(
-    /**
-     * Phone-local HistoryStore の autoinc。実運用で 2^53 (約 9 千兆) に到達することは無いので
-     * TS 側で `number` として安全に扱える。Phase 3 §3.6 の HistoryStore schema 参照。
-     */
+    /** docs/03 §2.2.4: HistoryStore autoinc。2^53 上限まで余裕。 */
     val id: Long,
     val role: MessageRole,
     val text: String,
