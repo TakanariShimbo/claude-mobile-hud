@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon (API 26+) を再導入。これが無いと Pixel Launcher は legacy raster
+  icon を自動で squircle 背景 + 60% 縮小処理してしまい、「丸 in 丸」になる。
+  foreground = round PNG (透明コーナー)、background = transparent にして
+  launcher の auto-background を抑止する。content は 108dp viewport を埋めるよう
+  生成済 (mipmap-{density}/ic_launcher_foreground.webp)。
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@android:color/transparent" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+</adaptive-icon>
