@@ -5,14 +5,8 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 
 /**
- * `BtAudioRouter` が見る `AudioManager` の最小 facade。Phase 5 で unit test 容易性を
- * 確保するため抽象化 (#183)。production は `AndroidAudioManagerLike`、test は `Fake`。
- *
- * 設計判断:
- *   - `AudioDeviceInfo` (Android 固有型) を直接露出させない。`BtCommDeviceRef` で
- *     必要 field (type / productName) だけ持つ value object に wrap し、router は
- *     `firstBtCommDevice()` から得たそれをそのまま `setCommunicationDevice` に渡す。
- *   - これで test 側は Android SDK 依存無しで全 fallback 経路を assert できる。
+ * `BtAudioRouter` が見る `AudioManager` の最小 facade (docs/03 §3.4.3.4 / §3.4.3.5)。
+ * `BtCommDeviceRef` value-object で Android 固有型 `AudioDeviceInfo` を test から隠す。
  */
 internal interface AudioManagerLike {
     var mode: Int
@@ -23,20 +17,12 @@ internal interface AudioManagerLike {
     fun clearCommunicationDevice()
 }
 
-/**
- * `AudioDeviceInfo` の最小代理。BtAudioRouter が log / 識別に使う field のみ持つ。
- * production は `AndroidBtCommDeviceRef` で `AudioDeviceInfo` を内包、test は data class。
- */
+/** docs/03 §3.4.3.5: `AudioDeviceInfo` の最小代理。test は data class 実装で差し替え。 */
 internal interface BtCommDeviceRef {
     val type: Int
     val productName: String
 }
 
-/**
- * production 用 wrapper。`context.getSystemService(AudioManager::class.java)` が null の
- * 場合は `fromContext` が null を返し、router 側で `audio_router_no_audio_manager` 警告
- * を出して false 戻しする。
- */
 internal class AndroidAudioManagerLike(private val am: AudioManager) : AudioManagerLike {
     override var mode: Int
         get() = am.mode
@@ -67,6 +53,7 @@ internal class AndroidAudioManagerLike(private val am: AudioManager) : AudioMana
 
 internal class AndroidBtCommDeviceRef(val device: AudioDeviceInfo) : BtCommDeviceRef {
     override val type: Int = device.type
+    // docs/03 §3.4.3.5: 一部端末で productName が SecurityException を投げるケースの防御。
     override val productName: String =
         runCatching { device.productName?.toString().orEmpty() }.getOrDefault("")
 }

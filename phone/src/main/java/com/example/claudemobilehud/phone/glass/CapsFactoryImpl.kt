@@ -6,26 +6,8 @@ import com.rokid.cxr.Caps
 import kotlinx.serialization.json.Json
 
 /**
- * Phase 3 §2.5 の `CapsFactory` を Rokid CXR `Caps` で実装する。
- *
- * **wire 構造**: Caps の最初の 2 key-value を `["json"] [JSON 文字列]` で固定。
- *   - 内部 JSON は kotlinx.serialization の `WireEvent` polymorphic encoding。
- *   - `WireEvent` は `@Serializable sealed interface` なので、コンパイラプラグインが
- *     自動で polymorphic serializer を生成する。手動の `SerializersModule` 登録は不要。
- *   - Caps を単純な 2-slot envelope として使う理由は (a) 設計書が `CapsFactory` を
- *     opaque な byte channel とみなしている (b) per-field のキー定義を Phone/Glass 両側で
- *     duplicate するより、`@SerialName` を持つ `WireEvent` を 1 か所で固定するほうが
- *     スキーマ進化を 1 ソースに集約できる。
- *
- * **JsonCodec との整合 (4c1 review P1-2)**:
- *   `:protocol.JsonCodec` と同一の Json 設定 (`classDiscriminator = "event"`,
- *   `encodeDefaults = false`, `explicitNulls = false`) を使う。これにより
- *   SSE 経由 (JsonCodec) と CXR 経由 (CapsFactoryImpl) でペイロードが完全に同型になる。
- *
- * **decode 防御 (P1-3)**:
- *   Rokid Caps の `Value.getString()` は型不整合時に `Caps$IncorrectTypeException`
- *   を投げる。`runCatching` で全 decode 経路をくるみ、malformed payload で binder
- *   callback を crash させない。
+ * Phone-side `CapsFactory` 実装 (docs/03 §2.5 / §2.5.2)。2-slot envelope の根拠 (§2.5.2.1)、
+ * JsonCodec との設定整合 (§2.5.2.2 P1-2)、decode 防御 (§2.5.2.3 P1-3) を参照。
  */
 class CapsFactoryImpl(
     private val json: Json = Json {
