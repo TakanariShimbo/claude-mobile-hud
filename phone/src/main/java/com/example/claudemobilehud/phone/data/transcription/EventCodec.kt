@@ -9,23 +9,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /**
- * OpenAI Realtime API (transcription-only) との JSON 往復をエンコード / デコードする。
- *
- * **送出 (encode)**:
- *   - [sessionUpdate]: 接続直後に 1 度だけ送る `session.update`。サンプリングレート /
- *     transcription model を確定させる。
- *   - [appendAudio]: 音声 chunk 1 つを base64 で乗せる `input_audio_buffer.append`。
- *
- * **受信 (decode)**: 我々が興味あるのは下記 4 種類のみ。他は ignore。
- *   - `transcription_session.updated` / `session.updated` → [TranscriptionEvent.SessionReady]
- *     (API 側のバージョン差を吸収するため両方を許容)。
- *   - `conversation.item.input_audio_transcription.delta` → [TranscriptionEvent.Delta]
- *   - `conversation.item.input_audio_transcription.completed` → [TranscriptionEvent.Completed]
- *   - `error` → [TranscriptionEvent.Error]
- *
- * 設計判断: `session.created` は接続直後の通知で session.update 反映前のため、
- * これを SessionReady とみなすと音声送信開始のタイミングが早すぎて初回 chunk が
- * drop される (実機検証で確認済)。よって除外。
+ * OpenAI Realtime API (transcription-only) JSON encode/decode (docs/03 §3.2.5.10)。
+ * 関心ある event type 4 種のマッピング表と `session.created` を除外する理由は §3.2.5.10 を参照。
  */
 internal object EventCodec {
     private val json = Json {
