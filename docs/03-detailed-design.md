@@ -243,6 +243,38 @@ data class ChatMessagePayload(
 )
 ```
 
+#### 2.2.1 `ts` (epoch ms) は `Long` で JS Number 安全
+
+全 WireEvent の `ts` は epoch ミリ秒の `Long`。JS `Number` の安全整数範囲 (2^53 - 1 =
+9_007_199_254_740_991) は西暦 287396 年まで余裕があるため、TS 側で `number` として
+扱っても精度欠落しない。`BigInt` への変換を強制すると Hub / Bridge / Phone の JSON
+シリアライザを統一できなくなるため避ける。
+
+#### 2.2.2 `CurrentSessionEvent.id == null` = clear セマンティクス
+
+`CurrentSessionEvent(id: String?)` の `null` は「現在 session 無し」(= clear) を意味
+する。Glass 側受信時に null チェック 1 つで「set / clear」を分岐できる:
+
+```kotlin
+event.id?.let { repository.selectSession(it) } ?: repository.clearCurrentSession()
+```
+
+別 `current_session_cleared` event を作る代替案より wire 表面積が小さく、`@SerialName`
+追加 / sealed branch 増殖を避けられる。
+
+#### 2.2.3 `ts` のみ持つ data class の equals 衝突注意
+
+`Hello` / `ListeningCancel` / `SessionOpen` / `SessionClose` / `Ping` は `ts` のみを
+持つ data class。設計上 `ts` は単調増加なので衝突しない前提だが、Kotlin の
+`equals == true` は同 `ts` で成立してしまう。将来 de-dup を入れる場合は **(kind, 受信
+時刻) で判定** し、`equals` には依存しないこと。
+
+#### 2.2.4 `ChatMessagePayload.id` の `Long` 採用
+
+Phone-local HistoryStore の autoinc を `Long` で持つ。実運用で 2^53 (約 9 千兆) 件に
+到達することは無いので TS 側で `number` として安全に扱える。HistoryStore schema は
+§3.6.1 参照。
+
 ### 2.3 enum 定義
 
 ```kotlin
@@ -367,7 +399,8 @@ object JsonCodec : Codec {
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = false
-        classDiscriminator = "event"  // sealed 判別を "event" フィールドで
+        explicitNulls = false                 // §2.5.4
+        classDiscriminator = "event"          // sealed 判別を "event" フィールドで
     }
     override fun encode(event: WireEvent): ByteArray =
         json.encodeToString(WireEvent.serializer(), event).toByteArray(Charsets.UTF_8)
@@ -376,9 +409,14 @@ object JsonCodec : Codec {
     }.getOrNull()
 }
 
-class CapsCodec(private val capsFactory: CapsFactory) : Codec {
-    // 実装は Phase 4
-    // Caps のキー = event の SerialName、フィールド = sealed の各 case フィールド
+interface CapsFactory {                       // §2.5.3
+    fun encode(event: WireEvent): ByteArray
+    fun decode(bytes: ByteArray): WireEvent?
+}
+
+class CapsCodec(private val factory: CapsFactory) : Codec {
+    override fun encode(event: WireEvent): ByteArray = factory.encode(event)
+    override fun decode(bytes: ByteArray): WireEvent? = factory.decode(bytes)
 }
 ```
 
@@ -465,37 +503,30 @@ if (keyValue.string != KEY_JSON) return@runCatching null
 
 **Glass-side `decodeFromCaps` (§2.5.1) も同根の防御**: `MsgCallback.onReceive` も binder callback なので、Caps fast-path 経路で同じ `runCatching` を維持する。Phone↔Glass どちらの受信側でも malformed payload で binder thread を死なせない契約。
 
-#### 2.2.1 `ts` (epoch ms) は `Long` で JS Number 安全
+#### 2.5.3 `CapsFactory` seam が同期 API である理由
 
-全 WireEvent の `ts` は epoch ミリ秒の `Long`。JS `Number` の安全整数範囲 (2^53 - 1 =
-9_007_199_254_740_991) は西暦 287396 年まで余裕があるため、TS 側で `number` として
-扱っても精度欠落しない。`BigInt` への変換を強制すると Hub / Bridge / Phone の JSON
-シリアライザを統一できなくなるため避ける。
+`CapsFactory` interface は `:protocol` を Android-free に保つための seam (実体は Phone /
+Glass 側で Rokid CXR-L SDK を呼ぶ `CapsFactoryImpl`)。**`suspend` を付けない同期 API**
+にしている理由:
 
-#### 2.2.2 `CurrentSessionEvent.id == null` = clear セマンティクス
+- CXR-L 1.0.1 では Caps の組み立て / 解析は CPU 同期処理で、I/O は別レイヤ (`sendCaps`
+  等) が扱う
+- encode/decode の seam に `suspend` を付けると `:protocol` の test (JVM 純粋関数想定)
+  に coroutines 依存を引き込む
 
-`CurrentSessionEvent(id: String?)` の `null` は「現在 session 無し」(= clear) を意味
-する。Glass 側受信時に null チェック 1 つで「set / clear」を分岐できる:
+将来 SDK が async 化したときに `suspend` 版を追加することは可能だが、同期版は残す
+(既存呼び出し側を縛らない両建て方針)。
 
-```kotlin
-event.id?.let { repository.selectSession(it) } ?: repository.clearCurrentSession()
-```
+#### 2.5.4 `JsonCodec` の `explicitNulls = false`
 
-別 `current_session_cleared` event を作る代替案より wire 表面積が小さく、`@SerialName`
-追加 / sealed branch 増殖を避けられる。
+null フィールドを encode 時に省略 / decode 時に欠落キーを null と解釈する設定。理由:
 
-#### 2.2.3 `ts` のみ持つ data class の equals 衝突注意
-
-`Hello` / `ListeningCancel` / `SessionOpen` / `SessionClose` / `Ping` は `ts` のみを
-持つ data class。設計上 `ts` は単調増加なので衝突しない前提だが、Kotlin の
-`equals == true` は同 `ts` で成立してしまう。将来 de-dup を入れる場合は **(kind, 受信
-時刻) で判定** し、`equals` には依存しないこと。
-
-#### 2.2.4 `ChatMessagePayload.id` の `Long` 採用
-
-Phone-local HistoryStore の autoinc を `Long` で持つ。実運用で 2^53 (約 9 千兆) 件に
-到達することは無いので TS 側で `number` として安全に扱える。HistoryStore schema は
-§3.6.1 参照。
+- Hub / Bridge (TypeScript) 側で `?: undefined` を毎度書かなくて済む — Kotlin の
+  `field: T? = null` ⇔ TS の `field?: T` が同じ wire 表現になる
+- `:protocol` の golden (§2.6) と TS golden の文字列比較が壊れない (null 出力されない
+  方が一致しやすい)
+- `CapsFactoryImpl` 側の Json 設定 (§2.5.2.2) も同じ値で揃え、SSE / CXR 経路の
+  ペイロード同型性を担保
 
 ### 2.6 双方向 parity test
 
