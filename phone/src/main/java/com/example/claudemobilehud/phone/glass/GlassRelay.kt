@@ -91,8 +91,18 @@ class GlassRelay(
     }
 
     private suspend fun observeSessionList(sender: (ByteArray) -> Unit) {
+        // FR-GL-20: Glass の session 一覧は **アクティブな session のみ** 表示する。
+        // Phone 側 SessionDrawer (`ui.sessions`) は履歴アクセスも兼ねるため
+        // inactive を含めて出すが、Glass は「いま操作できる session」だけを示すので
+        // ここで filter する。POC でも Glass 側は active のみだった。
+        // 注意: `current_session` wire (observeCurrentSession) は filter しないので、
+        // current が inactive 化したケースでは「list に居ない session が current」に
+        // なり得る。Glass UI 側は indexOfFirst で `-1` ガード済みなのでクラッシュは
+        // しないが、§3.4.1 の補注も参照。
         repository.uiState
-            .map { state -> state.sessions.map { it.toWirePayload() } }
+            .map { state ->
+                state.sessions.filter { it.isActive }.map { it.toWirePayload() }
+            }
             .distinctUntilChanged()
             .collect { list ->
                 sendWire(sender, SessionList(sessions = list, ts = System.currentTimeMillis()))

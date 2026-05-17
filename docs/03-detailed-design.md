@@ -1073,12 +1073,30 @@ private suspend fun observeAll(sender: (ByteArray) -> Unit) = coroutineScope {
     launch { repository.currentState.collect { send(sender, codec.encode(it.toWireEvent())) } }
 
     // eventual consistency (各々独立)
-    launch { repository.uiState.map { it.sessions }.distinctUntilChanged().collect { sendSessionList(sender, it) } }
+    // FR-GL-20: Glass の session 一覧は active のみ。Phone 側 SessionDrawer は
+    // 履歴アクセスを兼ねるため inactive も dot 区別付きで表示する (UI 意図差分)。
+    launch { repository.uiState.map { it.sessions.filter { s -> s.isActive } }.distinctUntilChanged().collect { sendSessionList(sender, it) } }
     launch { repository.uiState.map { it.currentSessionId }.distinctUntilChanged().collect { sendCurrentSession(sender, it) } }
     launch { repository.uiState.map { it.currentSessionId to it.messages }.distinctUntilChanged().collect { sendMessages(sender, it) } }
     launch { observeNotifications(sender) }
 }
 ```
+
+**Glass / Phone の session 一覧表示の UI 意図差分** (FR-GL-20 / FR-PH-50):
+
+| | 表示対象 | 理由 |
+|---|---|---|
+| Glass (`SessionList` wire、payload は `it.toWirePayload()` で `SessionSummaryPayload` に写像) | `isActive == true` のみ | Glass は「いま操作対象に出来る session」を選ぶ画面。inactive は出さない |
+| Phone (`SessionDrawer`) | active + inactive 全部、active には dot | Phone は履歴アクセスも兼ねたドロワー。inactive を見せて過去履歴に飛べるようにする |
+
+FR-PH-50 / FR-GL-20 の要件文は同一 (「アクティブなセッションを一覧表示する」) だが、Phone のドロワー UI 側はユーザ判断で「inactive も dot 区別で含める」運用に倒している (Phase 4 確定)。
+
+**`current_session` wire は filter しない** (`observeCurrentSession` は `currentSessionId` をそのまま送る):
+- `SessionInactive` 受信時、`SessionStore` は `activeSessionIds` から該当 id を外すが `currentSessionId` 自体はクリアしない (POC 互換)。
+- 結果として「list には居ないが current は指したまま」の組合せが Glass に届き得る。Glass 側 (`SessionSelectScreen.indexOfFirst`) は `-1` ガード済みでクラッシュしない。
+- POC 互換のためこの挙動は維持する。
+
+**wire payload に `isActive` フィールドは持たせない**: 現状 Phone 側で filter する設計なので `SessionSummaryPayload` には `isActive` が無い。将来 Glass 側で「inactive を別 UI で出す」要件が追加された場合は wire 拡張 (= 互換性破壊変更) が必要 (Phase 5+ で検討)。
 
 #### 3.4.2 `GlassEventDispatcher` (wire → Repository)
 
