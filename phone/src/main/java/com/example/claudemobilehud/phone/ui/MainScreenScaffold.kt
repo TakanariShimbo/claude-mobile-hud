@@ -44,8 +44,10 @@ import com.example.claudemobilehud.phone.ui.components.SessionDrawer
 import kotlinx.coroutines.launch
 
 /**
- * Phase 3 §3.5.1: TopBar / Drawer / MessageList / InputBar をまとめる。
+ * TopBar / Drawer / MessageList / InputBar をまとめる Scaffold (docs/03 §3.5.1.4)。
  * dialog 表示と LaunchedEffect 群は [MainScreenDialogs] / [MainScreenEffects] に分離。
+ * imePadding + adjustNothing のペア / photo picker / MessageList の recompose 最適化 /
+ * TopAppBar title fallback は §3.5.1.4 を参照。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -61,10 +63,7 @@ fun MainScreenScaffold(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    // P2-E of 4c2 review: Uri 取込は Repository に集約。エラーは Repository._errors
-     // → MainScreenEffects.toUserMessage 経由で localized snackbar が出る。ここで
-    // runCatching + 生 message を snackbar に出すと、ImageTooLarge の表示が UI 経路と
-    // 一貫しなかった。
+    // docs/03 §3.5.2.3: Uri 取込は Repository に集約 (error 翻訳の UI 漏れ防止)。
     val photoPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia(),
     ) { uri ->
@@ -136,11 +135,8 @@ fun MainScreenScaffold(
             snackbarHost = { SnackbarHost(dialogState.snackbar) },
             modifier = Modifier.fillMaxSize(),
         ) { padding ->
-            // IME 追従は `.imePadding()` が担当する。Activity 側で
-            // `windowSoftInputMode="adjustNothing"` (AndroidManifest.xml) を設定して
-            // system の window resize を黙らせているので、Android 15+ の `adjustResize`
-            // 強制と `.imePadding()` の二重補正は発生しない (= 入力欄下に隙間が出ない)。
-            // この 2 つはペアで動く設計なので、片方だけ外すと regression する。
+            // docs/03 §3.5.1.4: imePadding と Manifest の windowSoftInputMode=adjustNothing は
+            // ペア (片方だけ外すと入力欄下の隙間 regression)。
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -148,11 +144,7 @@ fun MainScreenScaffold(
                     .consumeWindowInsets(padding)
                     .imePadding(),
             ) {
-                // P2-A of 4c2 review: parent (Scaffold) は ui の他フィールド変化でも
-                // recompose されるが、MessageList は `messages: List<ChatMessage>` だけを
-                // 受け取り、LazyColumn の `key = { it.id }` で item-level recompose を
-                // 最小化する。`@Immutable` PhoneUiState (P3-A) + reference-equal messages
-                // で Compose の skip も働く。
+                // docs/03 §3.5.1.4: messages のみを引数化 + LazyColumn key で item-level recompose 最小化。
                 MessageList(
                     messages = ui.messages,
                     modifier = Modifier
@@ -163,7 +155,7 @@ fun MainScreenScaffold(
                 InputBar(
                     value = inputText,
                     onValueChange = { viewModel.updateInputText(it) },
-                    onSend = { viewModel.send(inputText) }, // P1-C: snapshot at click
+                    onSend = { viewModel.send(inputText) }, // docs/03 §3.5.2.2: click-time snapshot
                     onPickImage = {
                         photoPicker.launch(
                             PickVisualMediaRequest(
@@ -204,9 +196,7 @@ private fun currentSessionTitle(
 ): String {
     val id = currentSessionId ?: return "Claude Mobile HUD"
     val summary = sessions.firstOrNull { it.id == id }
-    // P3-B of 4c2 review: TopAppBar も SessionSummary.label を直接使う (SessionDrawer
-    // と同じ値)。session が一覧に居ない (= UNKNOWN_SESSION_ID で active 化前) の
-    // ケースだけ shortSessionLabel に fallback する。
+    // docs/03 §3.5.1.4 (P3-B): SessionSummary.label を優先、一覧に居ないときだけ id.take(8) fallback。
     val label = summary?.label ?: id.take(8)
     val count = summary?.messageCount ?: 0
     return "session $label  ·  $count msg"

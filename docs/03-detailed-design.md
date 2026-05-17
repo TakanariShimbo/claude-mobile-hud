@@ -1132,7 +1132,37 @@ OpenAI Realtime API (transcription-only) との JSON encode/decode 専用 intern
 | `conversation.item.input_audio_transcription.completed` | `Completed(text)` | 確定 transcript |
 | `error` | `Error(message)` | `error.message` を抽出、無ければ event 全体を文字列化 |
 
-**`session.created` を SessionReady としない理由**: `session.created` は接続直後の通知で **`session.update` 反映前**。これを SessionReady とみなして音声送信を開始すると、初回 chunk が API 側で format mismatch として drop される (実機検証で確認済、§3.2.5.4 pre-buffer 設計の根拠の 1 つ)。
+**`session.created` を SessionReady としない理由**: `session.created` は接続直後の通知で **`session.update` 反映前`**。これを SessionReady とみなして音声送信を開始すると、初回 chunk が API 側で format mismatch として drop される (実機検証で確認済、§3.2.5.4 pre-buffer 設計の根拠の 1 つ)。
+
+##### 3.2.5.11 `TranscriptionWs` (WebSocket transport)
+
+OpenAI Realtime API への WS 接続。`TranscriptionTransport` interface を満たす internal class。
+
+**URL / 認証**:
+
+```kotlin
+wss://api.openai.com/v1/realtime?intent=transcription
+Authorization: Bearer <apiKey>
+```
+
+`intent=transcription` で transcription-only mode に固定。
+
+**`onOpen` で `session.update` を 1 回送る**: WS 接続成功 (= `onOpen`) で `EventCodec.sessionUpdate(config)` を 1 回だけ送出。ack (= `SessionReady` event、§3.2.5.10) が返ってから初めて呼び出し側 (`TranscriptionClient`) が pre-buffer flush + 音声送信を開始する (§3.2.5.4)。
+
+**`pingInterval = 15s` (P3-10 専用 OkHttpClient)**: OpenAI 側の idle timeout は ~60s 程度。15s 間隔で WS ping を打って keep-alive する。SSE 用の `ChannelClient.defaultClient()` (§3.2.2) とは要件が違うため **WS 専用 OkHttpClient を分離** する:
+
+```kotlin
+fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
+    .pingInterval(15, TimeUnit.SECONDS)
+    .readTimeout(0, TimeUnit.MILLISECONDS)   // 長時間 idle (発話間沈黙) で殺さない
+    .build()
+```
+
+**Buffer policy (P2-5)**: event を運ぶ `Channel` は **bounded 256 + `DROP_LATEST`**。malicious server が message を連打しても無限 buffer に積まれない契約。通常運用 (delta / completed の頻度) では 256 件超は起こらない。
+
+**`onFailure` の順序**: `Error → Closed` を 2 連 emit。`TranscriptionClient` の `onEvent` は `Error` で `teardownToState(State.Error)` に倒し、続く `Closed` は既に Error なので noop (§3.2.5.3)。
+
+**`close()` で channel を閉じる**: ws を `runCatching { close(1000) }` した後、`_events.close()` で Channel も閉じる。collector 側は cancellation で teardown される (リーク防止)。
 
 #### 3.2.6 `Pairing` + `QrScanner`
 
@@ -1945,6 +1975,33 @@ LaunchedEffect(Unit) {
 **`POST_NOTIFICATIONS` (Android 13+)**: 未許可だと OS が reply/permission 通知を silent drop するため、app 起動時に 1 回 `RequestPermission` を出す。callback は log のみで拒否時の retry は user の Settings 経由に任せる。
 
 **`onActivityResult` deprecation の取り扱い (P2-C)**: `AuthorizationHelper.requestAuthorization` が legacy `startActivityForResult` API しか提供しないため、modern `ActivityResultContracts.StartActivityForResult` への移行は SDK 側が許す時まで待つ。現状は `@Deprecated` + `@Suppress("DEPRECATION")` で抑制。
+
+##### 3.5.1.4 `MainScreenScaffold` の細部設計
+
+TopAppBar + ModalNavigationDrawer + MessageList + InputBar を組み立てる Scaffold composable。
+
+**IME 追従の二重補正回避**: `Modifier.imePadding()` が IME 追従を担当し、Activity 側は `AndroidManifest.xml` で **`windowSoftInputMode="adjustNothing"`** を設定して system の window resize を抑制する。Android 15+ の `adjustResize` 強制と `.imePadding()` の二重補正が起きると、入力欄の下に不自然な隙間が出る (regression を実機で確認済)。**この 2 つはペアで動く設計** なので、片方だけ外すと再発する。
+
+**photo picker + RECORD_AUDIO permission の経路**:
+
+```kotlin
+val photoPicker = rememberLauncherForActivityResult(
+    ActivityResultContracts.PickVisualMedia(),
+) { uri -> if (uri != null) viewModel.attachImageFromUri(uri) }   // → Repository (§3.5.2.3)
+
+val micPermission = rememberLauncherForActivityResult(
+    ActivityResultContracts.RequestPermission(),
+) { granted ->
+    if (granted) viewModel.startTranscriptionPhoneMic()
+    else scope.launch { snackbar.showSnackbar("マイクの権限が必要です") }
+}
+```
+
+**MessageList の recompose 最適化 (P2-A)**: parent Scaffold は `ui` の他フィールド変化でも recompose されるが、`MessageList` は `messages: List<ChatMessage>` だけを受け取り、`LazyColumn` の `key = { it.id }` で item-level recompose を最小化する。`PhoneUiState.@Immutable` (P3-A) + reference-equal `messages` で Compose の skip も働く (§3.2.1.5)。
+
+**TopAppBar title fallback (P3-B)**: `currentSessionTitle` は `SessionSummary.label` を優先し、session が一覧に居ない場合 (= `UNKNOWN_SESSION_ID` で active 化前) のみ `id.take(8)` (shortSessionLabel) に fallback する。Drawer 側と同じ表記を保つことで、ユーザが drawer ↔ TopAppBar 間で session を identify できる契約。
+
+**send の click-time snapshot (P1-C)**: `onSend = { viewModel.send(inputText) }` は click 時の `inputText` を即座に引数として渡す (§3.5.2.2 と同じ理由 — IME composition / transcription partial の race を避ける)。
 
 #### 3.5.2 `ChatViewModel`
 
