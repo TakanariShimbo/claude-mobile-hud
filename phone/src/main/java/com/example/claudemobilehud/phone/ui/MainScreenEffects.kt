@@ -1,6 +1,5 @@
 package com.example.claudemobilehud.phone.ui
 
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import com.example.claudemobilehud.phone.data.error.PhoneWireError
@@ -10,12 +9,10 @@ import com.example.claudemobilehud.phone.data.transcription.TranscriptionClient
 import com.example.claudemobilehud.protocol.error.SharedWireError
 
 /**
- * MainScreen 内の LaunchedEffect 群。snackbar / dialog 自動表示の "副作用" を集約。
- * Phase 3 §3.5.1。
- *
- * - transcription Error → snackbar
- * - errors (Repository.errors) → snackbar / settings dialog 自動表示
- * - ConnectivityState.AuthFailed → settings 自動表示
+ * docs/03 §3.5.1.7: LaunchedEffect 3 経路 を集約:
+ *  (1) connectivity → settings 自動表示 (P1-A, Idle / AuthFailed)
+ *  (2) transcription Error → snackbar
+ *  (3) Repository.errors (transient) → snackbar
  */
 @Composable
 fun MainScreenEffects(
@@ -26,9 +23,7 @@ fun MainScreenEffects(
 ) {
     val snackbar = dialogState.snackbar
 
-    // P1-A of 4c2 review: Idle / AuthFailed の永続状態を観測したら settings を強制表示。
-    // connectivity が変わるたび再評価する (旧 MainScreenState の `LaunchedEffect(Unit)` 一度
-    // 限り発火だと、起動後に状態が変わったケースをカバーできなかった)。
+    // docs/03 §3.5.1.7: connectivity を key にすることで起動後の状態変化も再評価 (P1-A)。
     LaunchedEffect(connectivity) {
         when (connectivity) {
             ConnectivityState.Idle, ConnectivityState.AuthFailed -> dialogState.showSettings = true
@@ -36,14 +31,12 @@ fun MainScreenEffects(
         }
     }
 
-    // 一過性: transcription error は snackbar 通知。
     LaunchedEffect(transcriptionState) {
         if (transcriptionState is TranscriptionClient.State.Error) {
             snackbar.showSnackbar("音声入力エラー: ${transcriptionState.message}")
         }
     }
 
-    // Repository.errors (transient) を snackbar に流す。送信失敗 / BtScoUnavailable など。
     LaunchedEffect(Unit) {
         viewModel.errors.collect { err ->
             snackbar.showSnackbar(err.toUserMessage())
@@ -51,7 +44,7 @@ fun MainScreenEffects(
     }
 }
 
-/** UI 表示用の短いメッセージへ写像。詳細マッピングは §3.7。 */
+// docs/03 §3.5.1.7: snackbar 1 行 message 翻訳。詳細 UI 表現は §3.7 mapToPresentation。
 private fun TransientError.toUserMessage(): String = when (this) {
     is TransientError.Shared -> when (val w = error) {
         is SharedWireError.Connection.AuthFailed -> "token が無効です。設定を確認してください。"

@@ -12,14 +12,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 
-/**
- * MainScreen 内で共有する「dialog open/close + drawer + snackbar」状態ホルダ。
- * Phase 3 §3.5.1。`@Stable` を付けて compose 側の skip 最適化を許可。
- *
- * P1-A of 4c2 review: dialog 自動表示の判定 (Idle / AuthFailed → settings を開く)
- * はすべて [MainScreenEffects] に集約され、ここでは state container のみ提供する。
- * connectivity 引数を受け取らない設計に変更。
- */
+/** docs/03 §3.5.1.5: dialog/drawer/snackbar の transient state holder。connectivity 引数は取らない (P1-A)。 */
 @Stable
 class MainScreenDialogState(
     val snackbar: SnackbarHostState,
@@ -29,7 +22,7 @@ class MainScreenDialogState(
     var showGlass by mutableStateOf(false)
     var showExit by mutableStateOf(false)
 
-    /** 削除確認 dialog の対象 session id。null = dialog 閉じている。 */
+    /** null = 削除確認 dialog 閉じている。 */
     var pendingDeleteSessionId by mutableStateOf<String?>(null)
 }
 

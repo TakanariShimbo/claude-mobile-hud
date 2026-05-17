@@ -12,9 +12,7 @@ import com.example.claudemobilehud.phone.PhoneApplication
 import com.example.claudemobilehud.phone.ui.util.findActivity
 import kotlinx.coroutines.launch
 
-/**
- * アプリを完全終了する前の最終確認。OK で全 FGS を畳んで Activity も task ごと閉じる。
- */
+/** docs/03 §3.5.1.8: shutdownAll → finishAndRemoveTask の順序 (P2-H, FGS / Activity race 回避)。 */
 @Composable
 fun ExitDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
@@ -29,12 +27,6 @@ fun ExitDialog(onDismiss: () -> Unit) {
         confirmButton = {
             TextButton(
                 onClick = {
-                    // P2-H of 4c2 review: `shutdownAll` (suspend) → 完了後に
-                    // `finishAndRemoveTask()` の順を守る。逆順だと Activity が消えた
-                    // 直後に FGS stop 中の状態で OS が再起動を仕掛けに来る (FGS の
-                    // START_STICKY と Activity dispose の race)。`shutdownAll` の中で
-                    // FGS の stopForeground / stopSelf を await することで、
-                    // finishAndRemoveTask が走った時点でプロセスに残作業が無い。
                     scope.launch {
                         app.container.lifecycle.shutdownAll(context)
                         context.findActivity()?.finishAndRemoveTask()

@@ -10,16 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
-/**
- * Phone 設定の永続化。Phase 3 §3.6.2。Preferences DataStore。
- *
- * 鍵:
- *   base_url, token, openai_api_key, last_current_session_id
- *
- * NOTE: token は機微情報だが v1.0 では平文 Preferences。`androidx.security.crypto` への
- * 移行は将来 (key rotation の運用設計と合わせて)。NFR-20 LAN/Tailscale 前提の脅威モデル下では
- * Phone 自体が compromised 状況を主敵にはしていない。
- */
+/** docs/03 §3.6.2 / §3.6.2.3: DataStore Preferences で 4 key を持つ。v1.0 は平文 (脅威モデル参照)。 */
 class SettingsStore(private val context: Context) {
 
     val settings: Flow<Settings> = context.dataStore.data.map { prefs ->
@@ -27,6 +18,7 @@ class SettingsStore(private val context: Context) {
             baseUrl = prefs[KEY_BASE_URL] ?: "",
             token = prefs[KEY_TOKEN] ?: "",
             openAiApiKey = prefs[KEY_OPENAI_API_KEY] ?: "",
+            // docs/03 §3.6.2.3: empty-string は null 扱いで FR-PH-54 復元の誤動作回避。
             lastCurrentSessionId = prefs[KEY_LAST_SESSION_ID]?.takeIf { it.isNotEmpty() },
         )
     }
@@ -38,6 +30,7 @@ class SettingsStore(private val context: Context) {
             prefs[KEY_BASE_URL] = value.baseUrl
             prefs[KEY_TOKEN] = value.token
             prefs[KEY_OPENAI_API_KEY] = value.openAiApiKey
+            // docs/03 §3.6.2.3: empty 系は remove で正規化 (FR-PH-54 復元の誤動作回避)。
             if (value.lastCurrentSessionId.isNullOrEmpty()) {
                 prefs.remove(KEY_LAST_SESSION_ID)
             } else {

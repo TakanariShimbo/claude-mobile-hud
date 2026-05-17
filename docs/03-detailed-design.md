@@ -2209,6 +2209,74 @@ val micPermission = rememberLauncherForActivityResult(
 
 **send の click-time snapshot (P1-C)**: `onSend = { viewModel.send(inputText) }` は click 時の `inputText` を即座に引数として渡す (§3.5.2.2 と同じ理由 — IME composition / transcription partial の race を避ける)。
 
+##### 3.5.1.5 `MainScreenDialogState` (dialog / drawer / snackbar 状態 holder)
+
+`@Stable class` で dialog open/close + drawer + snackbar の transient state を保持。
+`viewModel.uiState` のような repo 由来の state は **含めない** (Compose recomposition
+の skip 境界を綺麗にする目的、§3.5.3)。
+
+- `showSettings` / `showGlass` / `showExit`: AlertDialog の表示 flag
+- `pendingDeleteSessionId: String?`: 削除確認 dialog の対象 (`null` = 閉じている)
+- `snackbar` / `drawer`: `SnackbarHostState` / `DrawerState` を持つ
+
+**P1-A 4c2 review**: dialog **自動表示** の判定 (Idle / AuthFailed → settings) は
+`MainScreenEffects` (§3.5.1.7) に集約し、ここでは state container のみ提供する。
+`MainScreenDialogState` は connectivity 引数を取らず、再評価ロジックを持たない。
+
+##### 3.5.1.6 `MainScreen` 最上位 composable (AD-18 の 3+1 分解 wiring)
+
+`MainScreen()` は `ChatViewModel` から `uiState` / `settings` / `connectivity` /
+`transcriptionState` / `inputText` を `collectAsStateWithLifecycle` で取り出し、
+**3 個の sibling composable + 1 個の state holder** に分配する:
+
+| sibling | 役割 |
+|---|---|
+| `MainScreenScaffold` | TopAppBar + Drawer + MessageList + InputBar (§3.5.1.4) |
+| `MainScreenDialogs` | Settings / Glass / Exit / Delete 確認の AlertDialog 群 |
+| `MainScreenEffects` | LaunchedEffect 群 (§3.5.1.7) |
+| `MainScreenDialogState` (holder) | dialog flag を 3 sibling で共有 |
+
+巨大な単一 composable では recomposition の粒度が粗く、無関係な state 変更でも再描画
+する。AD-18 (§3.5.3) の方針で粒度を細かく刻み、各 sibling は **自分が必要とする state
+だけ受け取る** (= 他フィールド変化で再描画されない)。
+
+##### 3.5.1.7 `MainScreenEffects` (LaunchedEffect 集約)
+
+3 つの副作用を集約:
+
+1. **connectivity 観測 → settings 自動表示 (P1-A)**: `LaunchedEffect(connectivity)` で
+   `Idle` / `AuthFailed` を観測したら `showSettings = true`。`connectivity` を key に
+   することで状態変化のたびに再評価する (旧設計の `LaunchedEffect(Unit)` 一度限り
+   発火だと、起動後に状態が変わったケースをカバーできなかった)
+2. **transcription error → snackbar**: `LaunchedEffect(transcriptionState)` で
+   `Error(message)` を observe したら snackbar 表示
+3. **`Repository.errors` → snackbar**: `LaunchedEffect(Unit)` で
+   `viewModel.errors.collect { ... }` し、`toUserMessage()` で localized text に変換
+   して snackbar 表示
+
+**`toUserMessage()` の責務分担**: `TransientError` を 1 行 message に翻訳する
+private 関数。`SharedWireError` / `PhoneWireError` の各 sub-case に対応する
+localized 文字列を 1 箇所に集約する (詳細な UI 表現分岐は §3.7 `mapToPresentation`
+側に置く想定で、ここは snackbar 1 行に縮約する単純化版)。
+
+##### 3.5.1.8 `ExitDialog` の `shutdownAll → finishAndRemoveTask` 順序 (P2-H)
+
+「Hub への接続と常駐通知を停止してアプリを終了します」を確認する AlertDialog。OK 時は
+**必ず以下の順序**で操作する:
+
+```kotlin
+scope.launch {
+    app.container.lifecycle.shutdownAll(context)       // 1. suspend で全 FGS を await 停止
+    context.findActivity()?.finishAndRemoveTask()      // 2. Activity を task ごと dispose
+}
+```
+
+逆順 (Activity を先に閉じる → FGS が START_STICKY で OS から自動再起動) を踏むと、
+**Activity が消えた直後に FGS stop 中の状態で OS が再起動を仕掛けに来る race** が
+発生する。`shutdownAll` の中で各 FGS の `stopForeground` / `stopSelf` を await する
+ことで、`finishAndRemoveTask` の時点でプロセスに残作業が無いことを保証する (P2-H
+の race 解消経路、§3.3.6 lifecycle 集約と対)。
+
 #### 3.5.2 `ChatViewModel`
 
 ```kotlin
@@ -2398,6 +2466,26 @@ Settings DataStore と分ける理由:
 - **`load(context)` の例外吸収**: MasterKey 異常 / 暗号鍵ローテ後のリストア等で `getString` が例外を投げるケースがあるため、`try { ... } catch (e: Throwable) { warn log; null fallback }` で起動を止めない
 - **`save` / `clear` の StateFlow 同期更新**: `prefs().edit { ... }` の直後に `_token.value = newValue` (or `null`)。observer (`GlassConnectionService.onStartCommand` 等) が最新値を即読む契約
 - **`load(context)` は `Application.onCreate` で 1 回だけ同期実行**: 以降の read は flow 経由で済むので lazy init は取らない (起動順は §3.3.6.1 ステップ 1)
+
+##### 3.6.2.3 `SettingsStore` の実装選択 (DataStore + 平文 v1.0)
+
+| 項目 | 採用 |
+|---|---|
+| backend | `androidx.datastore.preferences.preferencesDataStore` |
+| file 名 | `claude_mobile_hud_settings` |
+| token 暗号化 | **v1.0 では平文** (将来 `androidx.security.crypto` 移行を検討) |
+
+**v1.0 で `Hub token` を平文 Preferences に置く理由**: NFR-20 の脅威モデルは
+LAN / Tailscale の中間者 + 公衆 LAN での盗聴を主敵とする。**Phone 端末自体が compromise
+された状況は scope 外** にしているため、at-rest 暗号化は Hub token に対して優先度を
+下げる (CXR-L token は §3.6.2.1 で別に `EncryptedSharedPreferences` を使う = 役割が
+違うため別判断)。将来端末紛失モデルを脅威に組み込むときに `crypto-prefs` 化を検討する。
+
+**`lastCurrentSessionId` の empty-string handling**: 空文字を `null` 扱いにする
+(`prefs.remove(KEY)` で永続側からも削除する)。理由: Preferences は string key の
+absent と empty string を区別しにくく、復元時に `lastCurrentSessionId = ""` のような
+無効値を Settings に流すと FR-PH-54 復元ロジックが「session_id = '' を探す」変な状態
+を踏む。Save 側で必ず remove/set を分岐させる。
 
 #### 3.6.3 通知 channel id
 

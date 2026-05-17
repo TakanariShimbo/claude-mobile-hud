@@ -5,14 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 
-/**
- * Phase 3 §3.5.1 の最上位 composable。
- *
- * 巨大 composable は recomposition の粒度を粗くして無関係な state 変更でも再描画
- * させてしまうため、Rev 2 の AD-18 (Compose recomposition 戦略) で 3 + 1 (state holder)
- * に分解。各サブ composable は自分が必要とする state だけ受け取り、他フィールド変化で
- * 再描画されない。
- */
+/** docs/03 §3.5.1.6: AD-18 の 3 sibling composable + 1 state holder に分配する最上位 composable。 */
 @Composable
 fun MainScreen(viewModel: ChatViewModel = viewModel()) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
