@@ -168,9 +168,11 @@ USAGE
         fi
         node -e 'const fs=require("node:fs");fs.writeFileSync(process.argv[1],JSON.stringify({mcpServers:{channel:{type:"stdio",command:process.argv[2],args:[process.argv[3]],env:{BRIDGE_SESSION_ID:process.argv[4]}}}}))' \
             "$MCP_CONFIG_FILE" "$TSX_BIN" "$BRIDGE_ENTRY" "$target"
+        # claude CLI は --session-id と --resume の併用を --fork-session 無しでは拒否する。
+        # resume 時のセッション UUID は --resume $id だけで確定し、Bridge 側は MCP config の
+        # env.BRIDGE_SESSION_ID で別経路で渡しているので --session-id は冗長 → 落とす。
         exec claude \
             --mcp-config "$MCP_CONFIG_FILE" \
-            --session-id "$target" \
             --resume "$target" \
             --dangerously-load-development-channels server:channel \
             "$@"
