@@ -6,7 +6,7 @@
 
 <img src="./docs/images/demo.gif" alt="Phone と Glass から Claude Code を操作するデモ" width="800">
 
-_PC ターミナル (左) で `claude-mobile-hud run safe` 起動、Phone (中央) と Rokid Glasses (右) を [scrcpy](https://github.com/Genymobile/scrcpy) で PC にミラーした状態のデモ。_
+_流れ: ① PC ターミナル (左) で `claude-mobile-hud run safe` を起動 → Phone (中央) と Rokid Glasses (右) のセッション一覧に Claude セッションが現れる ② Glass のタッチパッドから音声で指示を送り、Claude の reply を HUD で受け取る ③ 両端末は [scrcpy](https://github.com/Genymobile/scrcpy) で PC にミラーした画面を録画した。_
 
 ## 概要
 
