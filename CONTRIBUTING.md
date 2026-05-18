@@ -14,7 +14,7 @@ PR / Issue 歓迎です。本プロジェクトは **個人ツールとしての
 ## 開発ワークフロー
 
 1. **Issue を立てる** — 変更内容と目的をテンプレートに沿って記述
-2. **ローカルで開発** — `CLAUDE.md` に adb / gradle / scrcpy の実用コマンド集あり
+2. **ローカルで開発** — `./gradlew :phone:installDebug` / `:glass:installDebug` で再インストール、`adb logcat -d --pid=$(adb shell pidof <pkg>)` で動作確認
 3. **テストを通す** — Kotlin / TypeScript / Python の全 unit test が green であること
 4. **PR を作成** — 変更点 + 設計書のどこに該当するか + 動作確認内容を本文に書く
 
