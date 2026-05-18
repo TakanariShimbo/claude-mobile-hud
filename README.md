@@ -4,6 +4,10 @@
 
 > **PC 上で動作する Claude Code を、Phone と Glass で遠隔監視・承認・音声指示できる個人用モバイル操作環境。**
 
+<img src="./docs/images/demo.gif" alt="Phone と Glass から Claude Code を操作するデモ" width="800">
+
+_PC ターミナル (左) で `claude-mobile-hud run safe` 起動、Phone (中央) と Rokid Glasses (右) を [scrcpy](https://github.com/Genymobile/scrcpy) で PC にミラーした状態のデモ。_
+
 ## 概要
 
 Claude Code が 自律的 (Auto Mode / `/goal`) になったぶん、ボトルネックは「AI エージェントの能力」より「人が PC の前にいるか」に寄ってきた。AI が走っているあいだの **確認・承認・指示出し** だけを Phone と Glass に逃がして、PC を離れても、AI を止めない、というのが本プロジェクトの狙い。
