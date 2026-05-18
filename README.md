@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/TakanariShimbo/claude-mobile-hud/actions/workflows/ci.yml/badge.svg)](https://github.com/TakanariShimbo/claude-mobile-hud/actions/workflows/ci.yml)
 
+> **Claude Code を PC から解放し、Phone と Rokid HUD で遠隔監視・承認・音声指示できる個人用モバイル操作環境。**
+
 PC の Claude Code を、**Android phone と Rokid Glass HUD** から操作するモバイルクライアント群。
 
 - **phone** (Android): 入力ハブ。テキスト / 音声 / 画像 / permission 応答 / セッション切替
