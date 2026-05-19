@@ -1,20 +1,8 @@
----
-title: Claude Code を Phone と Glass からリモート操作
-tags:
-    - ClaudeCode
-    - Rokid Glasses
-    - Whisper
-    - Channels
-    - CodexPets
----
-
-# Claude Code を Phone と Glass からリモート操作
-
 ## 何をした
 
 Claude Code を使った開発のボトルネックは、もはや AI の能力ではなく **「Claude を人が待たせる時間」** だと感じている。承認の応答、追加指示、返信の確認 — どれも PC の前にいないと進まない。
 
-そこで Phone と Glass から Claude Code をリモート操作できるようにした。
+そこで、Claude Code を Phone と Glass からリモート操作できるようにした。
 
 - **PC**: Ubuntu
 - **Phone**: Android
@@ -96,7 +84,7 @@ Claude Code は PC で動く。それに Phone からアクセスするために
 
 Glass も Phone も Android なので、このプロジェクトは Android アプリを書く時間が長いが、**Claude Code は Kotlin + Jetpack Compose + Gradle のスタックで気持ちよく動いてくれた**。Jetpack Compose は React 風の宣言的 UI なので、Android Studio のレイアウトエディタを開かずに `@Composable` を直接書ける。さらに、ビルドからデバッグまでも全部コマンドラインで完結する。そのため、**一連の開発を Claude がやってくれる** — `./gradlew :phone:installDebug` でビルドして実機にインストール、コンパイルエラーが出れば Gradle の出力からそのまま修正、`adb logcat` でクラッシュのスタックトレースを拾って該当行を直接修正。
 
-### Claude セッションとは MCP の Channels で繋いだ
+### Claude セッションとは MCP の Channels で接続
 
 返信を外に出して、外からの追加指示も流す双方向 push が必要だった。ここは Anthropic の研究プレビュー機能 **Channels** に乗っている。MCP の通知メソッドで Bridge と Claude セッションの間に双方向 push を張れて、承認の同期的なやりとりにも自然に乗る。
 
@@ -110,7 +98,7 @@ sequenceDiagram
     B->>C: permission verdict<br/>(allow / deny)
 ```
 
-### Rokid Glasses の SDK を Global 化した
+### Rokid Glasses の SDK を Global 化
 
 Rokid Glasses をスマホから制御する CXR-L SDK は、当初 **中国市場向けにのみ公開** されていて、Maven Central などの標準経路では取得できなかった。
 
@@ -128,11 +116,11 @@ https://github.com/TakanariShimbo/CxrGlobal
 
 https://developers.openai.com/api/docs/models/gpt-realtime-whisper
 
-### ペットを Glass に住まわせた
+### ペットを Glass に召喚
 
 Codex でペットを飼えるようになったのが最近話題になってる。ペットの各状態を縦、動きを横にとった画像を用意することで、自作のペットが作れるらしい。
 
-https://www.youtube.com/watch?v=uO2-G4lrbFc
+<iframe width="560" height="315" src="https://www.youtube.com/embed/uO2-G4lrbFc?si=lv1Oh3zay4DTHJen" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
 
 そこで Glass アプリをペットに対応させると同時に、Codex のスキルを使ってペットを作成してみた — **Konoha** という葉っぱの妖精 —。Codex Pets と共通規格で受け取った画像をもとに、Glass の片隅にペットを召喚し、会話状態 (Idle / Listening / Confirming / Waiting) に合わせてアニメするようにした。実用上は何の役にも立っていないが、視界の隅で Konoha が走り回るのを眺めながら AI と会話するの、地味に楽しい。
 
@@ -142,6 +130,6 @@ _Codex で生成した Konoha のスプライトシート。8 種類の状態 ×
 
 ## まとめ
 
-Claude Code が自律になっても、人間の役割が「確認・承認・追加指示」に置き換わるだけで、PC からの解放にはならない。本プロジェクトはその I/O だけを Phone + Rokid Glasses に逃がす試み。
+当初の狙いだった「**確認・承認・追加指示の I/O を Phone + Rokid Glasses に逃がす**」は達成できた。**「視界の隅に reply が流れる」** のは想像以上に良くて、Phone をポケットから出さずに済む時間が増えたぶん、AI を待たせずに別の作業に集中できる時間が長くなった。
 
-**「視界の隅に reply が流れる」** のは想像以上に良かった。Phone をポケットから出さずに済む時間が増えたぶん、別の作業に集中できる時間が長くなる。
+副産物として、MCP の Channels、CXR-L SDK の Global 化、Realtime Whisper、Codex Pets と、ふだんなら別々に触っていた技術を 1 プロジェクトで横断できたのも楽しかった。視界の隅で Konoha が走り回るのを眺めながら Claude と会話する画は、作ってる本人がいちばん気に入っている。
