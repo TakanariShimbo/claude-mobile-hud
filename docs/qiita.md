@@ -130,6 +130,4 @@ _Codex で生成した Konoha のスプライトシート。8 種類の状態 ×
 
 ## まとめ
 
-当初の狙いだった「**確認・承認・追加指示の I/O を Phone + Rokid Glasses に逃がす**」は達成できた。**「視界の隅に reply が流れる」** のは想像以上に良くて、Phone をポケットから出さずに済む時間が増えたぶん、AI を待たせずに別の作業に集中できる時間が長くなった。
-
-副産物として、MCP の Channels、CXR-L SDK の Global 化、Realtime Whisper、Codex Pets と、ふだんなら別々に触っていた技術を 1 プロジェクトで横断できたのも楽しかった。視界の隅で Konoha が走り回るのを眺めながら Claude と会話する画は、作ってる本人がいちばん気に入っている。
+当初の狙いだった「**確認・承認・追加指示の I/O を Phone + Rokid Glasses に逃がす**」を達成できた。副産物として、MCP の Channels、CXR-L SDK の Global 化、Realtime Whisper、Codex Pets と、様々な技術を 1 プロジェクトで横断できたのも楽しかった。視界の隅で Konoha が走り回るのを眺めながら Claude と会話する画は、作ってる本人がいちばん気に入っている。
