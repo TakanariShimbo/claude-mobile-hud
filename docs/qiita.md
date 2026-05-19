@@ -136,7 +136,7 @@ https://www.youtube.com/watch?v=uO2-G4lrbFc
 
 そこで Glass アプリをペットに対応させると同時に、Codex のスキルを使ってペットを作成してみた — **Konoha** という葉っぱの妖精 —。Codex Pets と共通規格で受け取った画像をもとに、Glass の片隅にペットを召喚し、会話状態 (Idle / Listening / Confirming / Waiting) に合わせてアニメするようにした。実用上は何の役にも立っていないが、視界の隅で Konoha が走り回るのを眺めながら AI と会話するの、地味に楽しい。
 
-<img src="./images/konoha-spritesheet.webp" alt="Konoha スプライトシート (Codex で生成)" width="400">
+<img src="./images/konoha-spritesheet.png" alt="Konoha スプライトシート (Codex で生成)" width="400">
 
 _Codex で生成した Konoha のスプライトシート。8 種類の状態 × 各フレームが並んでいて、Glass 側では Compose の Canvas + drawImage で再生している。_
 
