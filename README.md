@@ -8,6 +8,10 @@
 
 _流れ: ① PC ターミナル (左) で `claude-mobile-hud run safe` を起動 → Phone (中央) と Rokid Glasses (右) のセッション一覧に Claude セッションが現れる ② Glass のタッチパッドから音声で指示を送り、Claude の reply を HUD で受け取る ③ 両端末は [scrcpy](https://github.com/Genymobile/scrcpy) で PC にミラーした画面を録画した。_
 
+<img src="./docs/images/glass-hud-view.jpg" alt="Rokid Glasses のレンズ越しに見える HUD" width="400">
+
+_Rokid Glasses のレンズ越しに撮影した実機ビュー — フレーム中央下に Claude の reply (緑色の HUD) が浮かぶ。scrcpy ミラーでは伝わらない「視界の中に reply が出現する」感覚を補足。_
+
 ## 概要
 
 Claude Code が 自律的 (Auto Mode / `/goal`) になったぶん、ボトルネックは「AI エージェントの能力」より「人が PC の前にいるか」に寄ってきた。AI が走っているあいだの **確認・承認・指示出し** だけを Phone と Glass に逃がして、PC を離れても、AI を止めない、というのが本プロジェクトの狙い。
