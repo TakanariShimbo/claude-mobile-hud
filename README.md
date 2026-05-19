@@ -153,7 +153,6 @@ claude-mobile-hud rotate-token       # HUB_TOKEN を新規生成 + 書き込み
 ```json
 {
     "permissions": {
-        "defaultMode": "auto",
         "allow": ["mcp__channel__reply"]
     }
 }
