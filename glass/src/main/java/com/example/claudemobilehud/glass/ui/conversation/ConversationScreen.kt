@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,9 +21,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
@@ -46,13 +49,14 @@ import com.example.claudemobilehud.protocol.ChatMessagePayload
 import com.example.claudemobilehud.protocol.MessageRole
 import com.example.claudemobilehud.protocol.PendingPermissionPayload
 import com.example.claudemobilehud.protocol.TranscriptState
+import kotlinx.coroutines.delay
 
 /**
- * HUD 会話画面 (docs/03 §4.4 / §4.8、FR-GL-30〜33 / FR-GL-50〜62)。
+ * HUD 会話画面 (docs/03 §4.4 / §4.8、FR-GL-30〜33 / FR-GL-50〜62 / FR-GL-80〜83)。
  * onBack 間接参照 (§4.8.1)、1 swipe = 1 行 (§4.8.2)、CONFIRMING 中の auto-scroll 抑制
  * (§4.8.3)、MessageList key (§4.8.4 P2-F)、INCOMING 強調 (§4.8.5)、フォント定数集約
- * (§4.8.6 P3-B)、ScreenAwakeManager 連動 (§4.8.7)、空 input Confirming 防御 (§4.8.8 P3-E)
- * を参照。
+ * (§4.8.6 P3-B)、ScreenAwakeManager 連動 (§4.8.7)、空 input Confirming 防御 (§4.8.8 P3-E)、
+ * Konoha overlay 統合 (§4.8.9 / §4.11.7) を参照。
  */
 @Composable
 fun ConversationScreen(onBack: () -> Unit) {
@@ -97,6 +101,37 @@ fun ConversationScreen(onBack: () -> Unit) {
     // docs/03 §4.8.3: CONFIRMING 中は確認対象を見失わないよう auto-scroll を抑制。
     val autoScroll = state !is State.Confirming && state !is State.PermissionConfirming
 
+    // docs/03 §4.8.9: Konoha overlay (FR-GL-82)。送信 / 着信の瞬発演出 (RunningRight /
+    // RunningLeft) を KONOHA_OVERLAY_MS (~2s) だけ base state の上に被せる。base はそのまま
+    // 動く (Phone 側 mode 遷移と独立)。重畳時は後勝ち (set-to-null は冪等)。
+    var konohaOverlay by remember { mutableStateOf<KonohaState?>(null) }
+    LaunchedEffect(holder) {
+        holder.sendEvent.collect {
+            konohaOverlay = KonohaState.RunningRight
+            delay(KONOHA_OVERLAY_MS)
+            konohaOverlay = null
+        }
+    }
+    // docs/03 §4.8.9: 着信検出。最新 INCOMING の id が変わったら trigger。streaming で text
+    // 伸びる場合は同一 id なので発火しない (ChatMessagePayload.id は autoinc Long、§2.2.4)。
+    // initialIncomingScan ガードで画面再 mount 直後の履歴ロードは trigger 対象外 (FR-GL-82)。
+    var lastSeenIncomingId by remember { mutableStateOf<Long?>(null) }
+    var initialIncomingScan by remember { mutableStateOf(true) }
+    LaunchedEffect(messages) {
+        val newest = messages.lastOrNull { it.role == MessageRole.INCOMING }
+        if (newest != null && newest.id != lastSeenIncomingId) {
+            val triggerNow = !initialIncomingScan
+            lastSeenIncomingId = newest.id
+            if (triggerNow) {
+                konohaOverlay = KonohaState.RunningLeft
+                delay(KONOHA_OVERLAY_MS)
+                konohaOverlay = null
+            }
+        }
+        initialIncomingScan = false
+    }
+    val konohaState = konohaOverlay ?: state.toKonohaState()
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -105,16 +140,24 @@ fun ConversationScreen(onBack: () -> Unit) {
     ) {
         HintLine(state)
         Spacer(Modifier.height(4.dp))
-        ChatFrame(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(frameHeight),
         ) {
-            MessageList(
-                messages = messages,
-                state = listState,
-                autoScroll = autoScroll,
-                modifier = Modifier.fillMaxSize().padding(8.dp),
+            ChatFrame(modifier = Modifier.fillMaxSize()) {
+                MessageList(
+                    messages = messages,
+                    state = listState,
+                    autoScroll = autoScroll,
+                    modifier = Modifier.fillMaxSize().padding(8.dp),
+                )
+            }
+            KonohaSprite(
+                state = konohaState,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .offset(x = 12.dp, y = 12.dp),
             )
         }
         Spacer(Modifier.height(4.dp))
@@ -274,6 +317,10 @@ private fun ChoiceItem(label: String, focused: Boolean) {
 // docs/03 §4.8.6 (P3-B): HUD 文字サイズ + 行高の集約。LINE_HEIGHT_SP は MESSAGE_FONT_SP の約 1.75 倍 (実機計測)。
 private const val MESSAGE_FONT_SP = 12f
 private const val LINE_HEIGHT_SP = 21f
+
+// Konoha 演出の overlay 持続時間。Running* は 8 frames × ~120ms = ~1060ms / cycle なので
+// 2000ms ≈ 約 2 cycle 走ってから base 状態へ復帰。
+private const val KONOHA_OVERLAY_MS = 2000L
 
 @Composable
 private fun HintLine(state: State) {

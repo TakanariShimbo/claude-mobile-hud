@@ -123,6 +123,11 @@ class ConversationStateHolder(
     private val _scrollRequest = MutableSharedFlow<Int>(extraBufferCapacity = 8)
     val scrollRequest: SharedFlow<Int> = _scrollRequest.asSharedFlow()
 
+    // docs/03 §4.4 (Rev 4 追記): SEND verdict 確定の単発イベント。Konoha overlay (§4.8.9、
+    // FR-GL-82) 演出のための UI-only seam で、wire には流さない。
+    private val _sendEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val sendEvent: SharedFlow<Unit> = _sendEvent.asSharedFlow()
+
     // --- gesture dispatch (State の subtype に直接分岐) ---
     fun onGesture(g: GlassGesture) {
         when (val s = state.value) {
@@ -177,7 +182,10 @@ class ConversationStateHolder(
             GlassGesture.Tap -> {
                 // 決定。Phone 側で SWIPE_FORWARD/BACK 受信時に confirming=false → IDLE 推移する。
                 when (current) {
-                    SendChoice.SEND -> bridge.sendGesture(GestureKind.SWIPE_FORWARD)
+                    SendChoice.SEND -> {
+                        _sendEvent.tryEmit(Unit)
+                        bridge.sendGesture(GestureKind.SWIPE_FORWARD)
+                    }
                     SendChoice.CANCEL -> bridge.sendGesture(GestureKind.SWIPE_BACK)
                 }
             }
