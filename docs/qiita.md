@@ -1,5 +1,5 @@
 ---
-title: Claude Code を Phone と Glass からリモートコントロール
+title: Claude Code を Phone と Glass からリモート操作
 tags:
     - ClaudeCode
     - Rokid Glasses
@@ -8,7 +8,7 @@ tags:
     - CodexPets
 ---
 
-# Claude Code を Phone と Glass からリモートコントロール
+# Claude Code を Phone と Glass からリモート操作
 
 ## 何をした
 
